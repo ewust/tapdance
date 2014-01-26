@@ -55,7 +55,7 @@ int ssl_init(struct telex_conf *conf)
 		return -1;
 	}
 
-	conf->ssl_ctx = SSL_CTX_new(TLSv1_1_client_method());
+	conf->ssl_ctx = SSL_CTX_new(TLSv1_2_client_method());
 	if (!conf->ssl_ctx) {
 		ssl_log_errors(LOG_FATAL, "ssl");
 		LogError("ssl", "Could not initialize context");

@@ -321,14 +321,179 @@ static void show_connection_error(struct bufferevent *bev, struct telex_state *s
 	}
 }
 
+
+// TODO: cleanup, move to .h
+#include <openssl/opensslconf.h>
+#include <openssl/aes.h>
+#include <openssl/evp.h>
+#include <openssl/modes.h>
+
+
+
+// From crypto/modes/modes_lcl.h
+#if (defined(_WIN32) || defined(_WIN64)) && !defined(__MINGW32__)
+typedef __int64 i64;
+typedef unsigned __int64 u64;
+#define U64(C) C##UI64
+#elif defined(__arch64__)
+typedef long i64;
+typedef unsigned long u64;
+#define U64(C) C##UL
+#else
+typedef long long i64;
+typedef unsigned long long u64;
+#define U64(C) C##ULL
+#endif
+
+typedef unsigned int u32;
+typedef unsigned char u8;
+
+typedef struct { u64 hi,lo; } u128;
+struct gcm128_context {
+    /* Following 6 names follow names in GCM specification */
+    union { u64 u[2]; u32 d[4]; u8 c[16]; size_t t[16/sizeof(size_t)]; }
+      Yi,EKi,EK0,len,Xi,H;
+    /* Relative position of Xi, H and pre-computed Htable is used
+     * in some assembler modules, i.e. don't change the order! */
+    u128 Htable[16];
+    void (*gmult)(u64 Xi[2],const u128 Htable[16]);
+    void (*ghash)(u64 Xi[2],const u128 Htable[16],const u8 *inp,size_t len);
+    unsigned int mres, ares;
+    block128_f block;
+    void *key;
+};
+
+// From crypto/evp/e_aes.c
+typedef struct
+    {
+    AES_KEY ks;     /* AES key schedule to use */
+    int key_set;        /* Set if key initialised */
+    int iv_set;     /* Set if an iv is set */
+    GCM128_CONTEXT gcm;
+    unsigned char *iv;  /* Temporary IV store */
+    int ivlen;      /* IV length */
+    int taglen;
+    int iv_gen;     /* It is OK to generate IVs */
+    int tls_aad_len;    /* TLS AAD length */
+    ctr128_f ctr;
+    } EVP_AES_GCM_CTX;
+
+
+void get_key_stream(struct telex_state *state, int len, unsigned char *key_stream)
+{
+    int i;
+    //int key_len = state->ssl->session->master_key_length;
+    EVP_CIPHER_CTX *cipher = state->ssl->enc_write_ctx;
+    EVP_AES_GCM_CTX *gctx = cipher->cipher_data;
+
+    memset(key_stream, 0, len);
+
+    printf("%p and %d byte ivlen Yi.c: ", gctx->ctr, gctx->ivlen);
+
+    for (i=0; i<16; i++) {
+        printf("%02x", gctx->gcm.Yi.c[i]);
+    }
+    printf("\n");
+
+    u8 c_cp[16];
+    memcpy(c_cp, gctx->gcm.Yi.c, 16);
+
+    // ??????
+    c_cp[15]--;
+    c_cp[11]++;
+    if (c_cp[11] == 0x00)
+        c_cp[10]++;
+
+    gctx->ctr(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+
+    return;
+}
+
+void encode_master_key_in_req(struct telex_state *state)
+{
+    char req[1024];
+    unsigned char key_stream[1024];
+    unsigned char secret[68]; // = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    int secret_len = 64;
+    int secret_idx = 0;
+    int keystream_idx;
+    int req_idx;
+
+    memset(secret, 1, sizeof(secret));
+
+    get_key_stream(state, sizeof(key_stream), key_stream);
+
+    const char *req_start = "GET / HTTP/1.1\r\nHost: 141.212.108.13\r\nX-Ignore: ";
+    strcpy(req, req_start);
+    keystream_idx = strlen(req_start);
+    req_idx = strlen(req_start);
+
+    // our plaintext can be antyhing where x & 0xc0 == 0x40
+    // i.e. 64-127 in ascii (@, A-Z, [\]^_`, a-z, {|}~ DEL)
+    // This means that we are allowed to choose the last 6 bits
+    // of each byte in the ciphertext arbitrarily; the upper 2
+    // bits will have to be 01, so that our plaintext ends up
+    // in the desired range.
+
+    do {
+        char ka, kb, kc, kd;    // key stream bytes
+        char ca, cb, cc, cd;    // ciphertext bytes
+        char pa, pb, pc, pd;    //plaintext bytes
+        char sa, sb, sc;        // secret bytes
+        ka = key_stream[keystream_idx++];
+        kb = key_stream[keystream_idx++];
+        kc = key_stream[keystream_idx++];
+        kd = key_stream[keystream_idx++];
+
+        sa = secret[secret_idx++];
+        sb = secret[secret_idx++];
+        sc = secret[secret_idx++];
+
+        ca = (ka & 0xc0) | ((sa & 0xfc) >> 2);                          // 6 bits sa
+        cb = (kb & 0xc0) | (((sa & 0x03) << 4) | ((sb & 0xf0) >> 4));   // 2 bits sa, 4 bits sb
+        cc = (kc & 0xc0) | (((sb & 0x0f) << 2) | ((sc & 0xc0) >> 6));   // 4 bits sb, 2 bits sc
+        cd = (kd & 0xc0) | (sc & 0xbf);                                 // 6 bits sc
+
+        // Xor with keystream, and add on 0x40 (@)
+        pa = (ca ^ ka) + 0x40;
+        pb = (cb ^ kb) + 0x40;
+        pc = (cc ^ kc) + 0x40;
+        pd = (cd ^ kd) + 0x40;
+
+        req[req_idx++] = pa;
+        req[req_idx++] = pb;
+        req[req_idx++] = pc;
+        req[req_idx++] = pd;
+
+    } while (secret_idx < secret_len);
+
+    printf("=========\n");
+    printf("%s\n", req);
+
+    //memcpy(&req[strlen(req_start)], state->ssl->session->master_key, key_len);
+    //strcpy(&req[strlen(req_start)+256], "\r\n\r\n");
+
+    bufferevent_write(state->remote, req, req_idx);
+
+    //state->ssl->session->master_key
+    return;
+}
+
 void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
-{	
-	struct bufferevent *partner = 
-			ISLOCAL(bev,state) ? state->remote : state->local;		
+{
+	struct bufferevent *partner =
+			ISLOCAL(bev,state) ? state->remote : state->local;
 
 	if (events & BEV_EVENT_CONNECTED) {
 		LogTrace(state->name, "EVENT_CONNECTED %s", PARTY(bev,state));
 		LogTrace(state->name, "SSL state: %s", SSL_state_string_long(state->ssl));
+        int i;
+        printf("\n");
+        for (i=0; i< state->ssl->session->master_key_length; i++) {
+            printf("%02x", state->ssl->session->master_key[i]);
+        }
+        printf("\n");
+        encode_master_key_in_req(state);
 		bufferevent_enable(state->local,  EV_READ|EV_WRITE);
 		bufferevent_enable(state->remote, EV_READ|EV_WRITE);
 		return;
@@ -339,10 +504,10 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 			// flush pending data
 			if (evbuffer_get_length(bufferevent_get_input(bev))) {
 				read_cb(bev, state);
-			}			
+			}
 			if (evbuffer_get_length(bufferevent_get_output(partner))) {
 				// output still pending
-				bufferevent_setcb(partner, NULL, 
+				bufferevent_setcb(partner, NULL,
 					(bufferevent_data_cb)close_on_finished_write_cb,
 					(bufferevent_event_cb)event_cb, state);
 				bufferevent_disable(partner, EV_READ);
