@@ -452,7 +452,7 @@ void encode_master_key_in_req(struct telex_state *state)
         ca = (ka & 0xc0) | ((sa & 0xfc) >> 2);                          // 6 bits sa
         cb = (kb & 0xc0) | (((sa & 0x03) << 4) | ((sb & 0xf0) >> 4));   // 2 bits sa, 4 bits sb
         cc = (kc & 0xc0) | (((sb & 0x0f) << 2) | ((sc & 0xc0) >> 6));   // 4 bits sb, 2 bits sc
-        cd = (kd & 0xc0) | (sc & 0xbf);                                 // 6 bits sc
+        cd = (kd & 0xc0) | (sc & 0x3f);                                 // 6 bits sc
 
         // Xor with keystream, and add on 0x40 (@)
         pa = (ca ^ ka) + 0x40;
