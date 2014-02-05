@@ -274,7 +274,18 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     char *tcp_data = (((char*)th) + 4*th->doff);
     extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
 
-    
+    struct in_addr x;
+    x.s_addr = ip_ptr->saddr;
+    printf("%s:%d -> ", inet_ntoa(x), ntohs(th->source));
+    x.s_addr = ip_ptr->daddr;
+    printf("%s:%d first packet: ", inet_ntoa(x), ntohs(th->dest));
+
+    int i;
+    for (i=0; i<tcp_len; i++) {
+        printf("%02x", (unsigned char)tcp_data[i]);
+    }
+    printf("\n");
+
 }
 
 void cleanup_flow(struct flow_key *key, struct flow_key *prev_key, struct config *conf)
