@@ -20,7 +20,7 @@
 
 #define FLOW_EXPIRE_SECS    10      // note: this is the time between TLS data packets...
 #define PCAP_FILTER_STR     "tcp and port 443"
-#define STEGO_DATA_LEN      128
+#define STEGO_DATA_LEN      64
 
 // Generic type used in a map[(ip,port)] -> flow.value
 // used for both TCP and UDP, though UDP only uses dst_packets and pcap_file.
@@ -192,9 +192,52 @@ int is_tls_data_packet(struct tcphdr *th, size_t tcp_len)
     return ((tcp_len > 1) && ((*data) == '\x17'));
 }
 
-void extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
+int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
 {
+    int ret_len = 0;
+    if (data_len < 5) {
+        return ret_len;
+    }
 
+    unsigned char *p = data;
+    char content_type = *p++;
+    uint16_t version = (*p++ << 8);
+    version |= *p++;
+            
+    uint16_t ssl_length = (*p++ << 8);
+    ssl_length |= *p++;
+
+    if (ssl_length + 5 > data_len) {
+        return ret_len;
+    }
+    p+=56;  // stego starts 8+48 bytes in for GCM
+    int i = 0;
+    while (i<ssl_length-59) {
+        char ca, cb, cc, cd;
+        uint32_t x;
+        ca = p[i++];
+        cb = p[i++];
+        cc = p[i++];
+        cd = p[i++];
+
+        x = (ca & 0x3f)*(64*64*64) + (cb & 0x3f)*(64*64) + (cc & 0x3f)*(64) + (cd & 0x3f);
+
+        *out++ = (x >> 16) & 0xff;
+        ret_len++;
+        if (ret_len >= out_len)
+            break;
+
+        *out++ = (x >> 8) & 0xff;
+        ret_len++;
+        if (ret_len >= out_len)
+            break;
+
+        *out++ = (x & 0xff);
+        ret_len++;
+        if (ret_len >= out_len)
+            break;
+    }
+    return ret_len;
 }
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
@@ -272,19 +315,23 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     // Attempt to extract stego channel
     char stego_data[STEGO_DATA_LEN];
     char *tcp_data = (((char*)th) + 4*th->doff);
-    extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
+    memset(stego_data, 0, sizeof(stego_data));
+    int extract_len = extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
 
-    struct in_addr x;
-    x.s_addr = ip_ptr->saddr;
-    printf("%s:%d -> ", inet_ntoa(x), ntohs(th->source));
-    x.s_addr = ip_ptr->daddr;
-    printf("%s:%d first packet: ", inet_ntoa(x), ntohs(th->dest));
+    if (memcmp(stego_data, "Hello, world", 12)==0) { // || ip_ptr->saddr == 0x236fd48d) {
+        struct in_addr x;
+        x.s_addr = ip_ptr->saddr;
+        printf("%d : %s:%d -> ", extract_len, inet_ntoa(x), ntohs(th->source));
+        x.s_addr = ip_ptr->daddr;
+        printf("%s:%d first packet: ", inet_ntoa(x), ntohs(th->dest));
 
-    int i;
-    for (i=0; i<tcp_len; i++) {
-        printf("%02x", (unsigned char)tcp_data[i]);
+        int i;
+        for (i=0; i<tcp_len; i++) {
+            printf("%02x", (unsigned char)tcp_data[i]);
+        }
+        printf("\n");
+        printf("stego data: %s\n", stego_data);
     }
-    printf("\n");
 
 }
 
