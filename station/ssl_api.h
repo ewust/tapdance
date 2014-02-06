@@ -9,6 +9,7 @@ extern "C" {
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include <openssl/ssl.h>
 #include <openssl/hmac.h>
@@ -37,10 +38,10 @@ int my_ssl_write(BIO *b, const char *in, int len);
 
 int my_ssl_read(BIO *b, char *out, int len);
 
-SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void *client_random, void *server_random, int is_server);
+SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite);
 
 /* Given a "live" SSL object, change its secrets for communication via Telex. */
-int switch_to_telex_crypto(SSL *ssl, void *telex_secret, unsigned int telex_secret_length, int is_server);
+int switch_to_telex_crypto(SSL *ssl, char *master_key, size_t master_key_len, uint16_t cipher_suite);
 
 int ssl_encrypt(SSL *s, const char *in, int len, char **out);
 int ssl_shutdown(SSL *s, char **out);

@@ -186,9 +186,10 @@ int telex_get_shared_secret(BIGNUM *client_dh_priv_key, BIGNUM *p, BIGNUM *serve
 //key: 32 bytes
 //iv: 16 bytes
 //mac_secret: 20 bytes
-SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void *client_random, void *server_random, int is_server)
+SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite)
 {
     static SSL_CTX *ctx = 0;
+    // TODO(ewust/SPTelex): probably having a single context is ok?
     if (!ctx) {
       /* Build our SSL context*/
       //ctx=initialize_ctx(KEYFILE,PASSWORD);
@@ -196,7 +197,7 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
       SSL_load_error_strings();
       //extern BIO *bio_err;
     //bio_err = BIO_new_fp(stderr, BIO_NOCLOSE);
-      ctx = SSL_CTX_new(TLSv1_client_method());
+      ctx = SSL_CTX_new(TLSv1_2_server_method());
     }
     SSL *ssl = SSL_new(ctx);
     if (!ssl) {
@@ -206,13 +207,13 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
 
     //ssl->telex_client_random = "hello, worldxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n";
 
-    if (is_server) {
+    //if (is_server) {
       ssl->type = SSL_ST_ACCEPT;
-      ssl->method = TLSv1_server_method();
-    } else {
+      ssl->method = TLSv1_2_server_method();
+    /*} else {
       ssl->type = SSL_ST_CONNECT;
       ssl->method = TLSv1_client_method();
-    }
+    } */
     ssl->rwstate = SSL_NOTHING;
     ssl->in_handshake = 0; /* We're simulating having finished SSL_connect. */
     ssl->handshake_func = ssl3_connect;
@@ -284,6 +285,7 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
     //ssl->mode is set in SSL_new.
     //ssl->max_cert_list is set in SSL_new.
 
+    // TODO(ewust/SPTelex): would this be TLS 1.0 or TLS 1.2?
     ssl->client_version = ssl->version;
     //  ssl->max_send_fragment is set in SSL_new.
 
@@ -294,6 +296,7 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
     assert(ssl->tlsext_ocsp_resplen == -1);
     assert(ssl->tlsext_ticket_expected == 0);
 
+    // TODO(ewust/SPTelex): might be needed; but we already have master key?
 #if 0
     // The elliptic curve stuff below probably isn't necessary if
     // we're not using an elliptic curve cipher.
@@ -319,6 +322,7 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
     //memset(ssl->s3, 0, sizeof(*ssl->s3));
 
 
+    // TODO(SPTelex): don't think 1.2 in GCM needs this
     ssl->s3->need_empty_fragments = 1;
 
     //SSL3_BUFFER is {buf, len, offset, left};
@@ -420,11 +424,12 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
         memcpy(&ssl->s3->tmp.key_block[72], read->key, 32);
         memcpy(&ssl->s3->tmp.key_block[120], read->iv, 16);
 #endif
-        memcpy(ssl->s3->client_random, client_random, 32);
-        memcpy(ssl->s3->server_random, server_random, 32);
+        // TODO(ewust/SPTelex)
+        //memcpy(ssl->s3->client_random, client_random, 32);
+        //memcpy(ssl->s3->server_random, server_random, 32);
 
-        if (!switch_to_telex_crypto(ssl, telex_secret,
-                                    telex_secret_length, is_server)) {
+        if (!switch_to_telex_crypto(ssl, master_key,
+                                    master_key_len, cipher_suite)) {
           fprintf(stderr, "Couldn't change to telex crypto!\n");
           exit(-1);
         }
@@ -432,17 +437,19 @@ SSL* get_live_ssl_obj(void *telex_secret, unsigned int telex_secret_length, void
 }
 
 
-int switch_to_telex_crypto(SSL *ssl, void *telex_secret,
-                           unsigned int telex_secret_length, int is_server) {
+int switch_to_telex_crypto(SSL *ssl, char *master_key, size_t master_key_len,
+                           uint16_t cipher_suite) {
     // SSL record sequence numbers should be 1; we just got done with
     // a round of hellos (unless we are using TELEX_LEAK_KEY).
-    if (is_server) {
+    //if (is_server) {
       ssl->type = SSL_ST_ACCEPT;
-      ssl->method = TLSv1_server_method();
+      ssl->method = TLSv1_2_server_method();
+    /*
     } else {
       ssl->type = SSL_ST_CONNECT;
       ssl->method = TLSv1_client_method();
     }
+    */
 
     memset(ssl->s3->read_sequence, 0, sizeof(ssl->s3->read_sequence));
     memset(ssl->s3->write_sequence, 0, sizeof(ssl->s3->write_sequence));
@@ -466,17 +473,23 @@ int switch_to_telex_crypto(SSL *ssl, void *telex_secret,
 
     ssl->s3->tmp.finish_md_len = 12;
 
-    //DHE-RSA-AES256-SHA
-    ssl->s3->tmp.new_cipher = (SSL_CIPHER*)ssl3_get_cipher_by_char((const unsigned char *)"\x00\x39");
+    // (was DHE-RSA-AES256-SHA) \x00\x39 ...
+    // now we select our own     
+    ssl->s3->tmp.new_cipher = (SSL_CIPHER*)ssl3_get_cipher_by_char((const unsigned char *)&cipher_suite);
     ssl->session->cipher = ssl->s3->tmp.new_cipher;
 
+    /*
     ssl->session->master_key_length = \
       tls1_generate_master_secret(ssl,
                                   ssl->session->master_key,
                                   telex_secret, telex_secret_length);
+    */
+    ssl->session->master_key_length = master_key_len;
+    memcpy(ssl->session->master_key, master_key, master_key_len);
+    // Woo! That felt good.
     //hexdump(ssl->session->master_key, ssl->session->master_key_length);
 
-    memset(telex_secret, 0, telex_secret_length); // Sore wa himitsu desu!
+    //memset(telex_secret, 0, telex_secret_length); // Sore wa himitsu desu!
 
     if (!tls1_setup_key_block(ssl)) {
       fprintf(stderr, "Couldn't set up key block\n");
@@ -485,11 +498,11 @@ int switch_to_telex_crypto(SSL *ssl, void *telex_secret,
 
 
     // These guys reset ssl->s3->write_sequence and read_sequence respectively....(what else)
-    if (!tls1_change_cipher_state(ssl, is_server ? SSL3_CHANGE_CIPHER_SERVER_WRITE : SSL3_CHANGE_CIPHER_CLIENT_WRITE)) {
+    if (!tls1_change_cipher_state(ssl, SSL3_CHANGE_CIPHER_SERVER_WRITE)) {
       fprintf(stderr, "Couldn't change write cipher state\n");
       return 0;
     }
-    if (!tls1_change_cipher_state(ssl, is_server ? SSL3_CHANGE_CIPHER_SERVER_READ : SSL3_CHANGE_CIPHER_CLIENT_READ)) {
+    if (!tls1_change_cipher_state(ssl, SSL3_CHANGE_CIPHER_SERVER_READ)) {
       fprintf(stderr, "Couldn't change read cipher state\n");
       return 0;
     }
@@ -497,16 +510,11 @@ int switch_to_telex_crypto(SSL *ssl, void *telex_secret,
 /* For TELEX_LEAK_KEY, we have to "consume" the client_finished message,
     (and "send" the server finished message). This will increase read/write_sequence,
     as well as change the working iv's for ssl->enc_{write,read}_ctx->iv */
-#ifndef TELEX_LEAK_KEY
-    ssl->s3->read_sequence[7] = '\x01';
-    ssl->s3->write_sequence[7] = '\x01';
-#else
    //TODO(ewust): set working iv's here (and possibly remove the following)
     ssl->s3->read_sequence[7] = '\x01';
     ssl->s3->write_sequence[7] = '\x01';
 
     // IVs (in cbc mode) are simply the last 16-bytes of ciphertext over the wire.
-#endif
 
     return 1;
 }
