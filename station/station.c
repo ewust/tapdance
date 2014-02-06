@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <getopt.h>
 #include "pfring.h"
+#include "ssl_api.h"
 
 
 #define FLOW_EXPIRE_SECS    10      // note: this is the time between TLS data packets...
@@ -318,19 +319,30 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     memset(stego_data, 0, sizeof(stego_data));
     int extract_len = extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
 
-    if (memcmp(stego_data, "Hello, world", 12)==0) { // || ip_ptr->saddr == 0x236fd48d) {
+    if (memcmp(stego_data, "SPTELEX", 7)==0) { // || ip_ptr->saddr == 0x236fd48d) {
+        size_t master_key_len;
+        char *master_key;
         struct in_addr x;
         x.s_addr = ip_ptr->saddr;
         printf("%d : %s:%d -> ", extract_len, inet_ntoa(x), ntohs(th->source));
         x.s_addr = ip_ptr->daddr;
-        printf("%s:%d first packet: ", inet_ntoa(x), ntohs(th->dest));
+        printf("%s:%d : ", inet_ntoa(x), ntohs(th->dest));
 
+        master_key_len = stego_data[7];
+        if (master_key_len > extract_len - 8) {
+            master_key_len = extract_len - 8;
+        }
+        master_key = &stego_data[8];
         int i;
-        for (i=0; i<tcp_len; i++) {
-            printf("%02x", (unsigned char)tcp_data[i]);
+        for (i=0; i<master_key_len; i++) {
+            printf("%02x", (unsigned char)master_key[i]);
         }
         printf("\n");
-        printf("stego data: %s\n", stego_data);
+        
+        SSL* ssl;
+        ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e));
+        printf("%p\n", ssl);
+        //printf("stego data: %s\n", stego_data);
     }
 
 }
