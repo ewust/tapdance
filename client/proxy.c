@@ -25,6 +25,7 @@
 #include "ssl.h"
 #include "state.h"
 #include "util.h"
+#include "gcm.h"
 
 static void read_cb(struct bufferevent *, struct telex_state *);
 static void event_cb(struct bufferevent *, short, struct telex_state *);
@@ -32,6 +33,16 @@ static void drained_write_cb(struct bufferevent *, struct telex_state *);
 static void close_on_finished_write_cb(struct bufferevent *, struct telex_state *);
 
 #define MAX_OUTPUT_BUFFER (512*1024)
+
+/* I don't know why the fuck gcc can't seem to find this.
+  _EVENT_HAVE_OPENSSL is set to 1 in /usr/include/event2/event-config.h,
+ and event2/bufferevent_ssl.h is present. */
+struct bufferevent *
+bufferevent_openssl_filter_new(struct event_base *base,
+    struct bufferevent *underlying,
+    struct ssl_st *ssl,
+    enum bufferevent_ssl_state state,
+    int options);
 
 // Simple resource counters
 // (help with debugging memory leaks)
@@ -123,20 +134,6 @@ void proxy_notblocked_getaddrinfo_cb(int result, struct evutil_addrinfo *ai,
 
     
 }
-
-
-/* I don't know why the fuck gcc can't seem to find this.
-  _EVENT_HAVE_OPENSSL is set to 1 in /usr/include/event2/event-config.h,
- and event2/bufferevent_ssl.h is present. */
-struct bufferevent *
-bufferevent_openssl_filter_new(struct event_base *base,
-    struct bufferevent *underlying,
-    struct ssl_st *ssl,
-    enum bufferevent_ssl_state state,
-    int options);
-
-
-
 
 // We've accepted a connection for proxying...
 // Establish a connection to server specified in conf
@@ -322,63 +319,6 @@ static void show_connection_error(struct bufferevent *bev, struct telex_state *s
 }
 
 
-// TODO: cleanup, move to .h
-#include <openssl/opensslconf.h>
-#include <openssl/aes.h>
-#include <openssl/evp.h>
-#include <openssl/modes.h>
-
-
-
-// From crypto/modes/modes_lcl.h
-#if (defined(_WIN32) || defined(_WIN64)) && !defined(__MINGW32__)
-typedef __int64 i64;
-typedef unsigned __int64 u64;
-#define U64(C) C##UI64
-#elif defined(__arch64__)
-typedef long i64;
-typedef unsigned long u64;
-#define U64(C) C##UL
-#else
-typedef long long i64;
-typedef unsigned long long u64;
-#define U64(C) C##ULL
-#endif
-
-typedef unsigned int u32;
-typedef unsigned char u8;
-
-typedef struct { u64 hi,lo; } u128;
-struct gcm128_context {
-    /* Following 6 names follow names in GCM specification */
-    union { u64 u[2]; u32 d[4]; u8 c[16]; size_t t[16/sizeof(size_t)]; }
-      Yi,EKi,EK0,len,Xi,H;
-    /* Relative position of Xi, H and pre-computed Htable is used
-     * in some assembler modules, i.e. don't change the order! */
-    u128 Htable[16];
-    void (*gmult)(u64 Xi[2],const u128 Htable[16]);
-    void (*ghash)(u64 Xi[2],const u128 Htable[16],const u8 *inp,size_t len);
-    unsigned int mres, ares;
-    block128_f block;
-    void *key;
-};
-
-// From crypto/evp/e_aes.c
-typedef struct
-    {
-    AES_KEY ks;     /* AES key schedule to use */
-    int key_set;        /* Set if key initialised */
-    int iv_set;     /* Set if an iv is set */
-    GCM128_CONTEXT gcm;
-    unsigned char *iv;  /* Temporary IV store */
-    int ivlen;      /* IV length */
-    int taglen;
-    int iv_gen;     /* It is OK to generate IVs */
-    int tls_aad_len;    /* TLS AAD length */
-    ctr128_f ctr;
-    } EVP_AES_GCM_CTX;
-
-
 void get_key_stream(struct telex_state *state, int len, unsigned char *key_stream)
 {
     int i;
@@ -413,17 +353,22 @@ void encode_master_key_in_req(struct telex_state *state)
 {
     char req[1024];
     unsigned char key_stream[1024];
-    unsigned char secret[68]; // = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
-    int secret_len = 64;
+    unsigned char secret[200]; // = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    int secret_len = 200;
     int secret_idx = 0;
     int keystream_idx;
     int req_idx;
 
-    memset(secret, 1, sizeof(secret));
+    memset(secret, 0, sizeof(secret));
+    int i;
+    strcpy((char *)secret, "Hello, world:         ");
+    for (i=0; i<state->ssl->session->master_key_length; i++) {
+        sprintf((char*)&secret[2*i+14], "%02x", state->ssl->session->master_key[i]);
+    }
 
     get_key_stream(state, sizeof(key_stream), key_stream);
 
-    const char *req_start = "GET / HTTP/1.1\r\nHost: 141.212.108.13\r\nX-Ignore: ";
+    const char *req_start = "GET / HTTP/1.1\r\nHost: www.example.cn\r\nX-Ignore: ";
     strcpy(req, req_start);
     keystream_idx = strlen(req_start);
     req_idx = strlen(req_start);
