@@ -23,6 +23,9 @@
 #include <assert.h>
 #include <stdint.h>
 
+#define SSL_CIPHER_LIST_STR "ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,DHE-RSA-AES128-GCM-SHA256,AES128-GCM-SHA256,ECDHE-ECDSA-AES256-SHA,ECDHE-RSA-AES256-SHA,DHE-RSA-AES256-SHA,AES256-SHA,ECDHE-ECDSA-RC4-SHA,ECDHE-ECDSA-AES128-SHA,ECDHE-RSA-RC4-SHA,ECDHE-RSA-AES128-SHA,DHE-RSA-AES128-SHA,DHE-DSS-AES128-SHA,RC4-SHA,RC4-MD5,AES128-SHA,DES-CBC3-SHA"
+//"ECDHE-ECDSA-AES128-GCM-SHA256,ECDHE-RSA-AES128-GCM-SHA256,"
+
 int ssl_log_errors(enum LogLevel level, const char *name)
 {
 	int count = 0;
@@ -56,6 +59,7 @@ int ssl_init(struct telex_conf *conf)
 	}
 
 	conf->ssl_ctx = SSL_CTX_new(TLSv1_2_client_method());
+    SSL_CTX_set_cipher_list(conf->ssl_ctx, SSL_CIPHER_LIST_STR);
 	if (!conf->ssl_ctx) {
 		ssl_log_errors(LOG_FATAL, "ssl");
 		LogError("ssl", "Could not initialize context");
