@@ -20,7 +20,7 @@
 
 #define FLOW_EXPIRE_SECS    10      // note: this is the time between TLS data packets...
 #define PCAP_FILTER_STR     "tcp and port 443"
-#define STEGO_DATA_LEN      64
+#define STEGO_DATA_LEN      200
 
 // Generic type used in a map[(ip,port)] -> flow.value
 // used for both TCP and UDP, though UDP only uses dst_packets and pcap_file.
