@@ -340,20 +340,8 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     
 
         int i;
-        for (i=0; i<master_key_len; i++) {
-            printf("%02x", (unsigned char)master_key[i]);
-        }
-        printf(" server rand: ");
-        for (i=0; i<32; i++) {
-            printf("%02x", server_random[i]);
-        }
-        printf(" client rand: ");
-        for (i=0; i<32; i++) {
-            printf("%02x", client_random[i]);
-        }
-        printf("\n");
-        
         SSL* ssl;
+
         ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e), server_random, client_random);
         printf("%p\n", ssl);
 
@@ -372,7 +360,6 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
         }
         printf("\n");
         printf("our write ctx: %p\n", ssl->enc_write_ctx);
-
 
 
         if (ssl_decrypt(ssl, tcp_data, tcp_len - 4*th->doff, &req_plaintext) < 0) {
