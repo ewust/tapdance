@@ -1,97 +1,4 @@
-#include <pcap.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netinet/if_ether.h>
-#include <netinet/tcp.h>
-#include <netinet/udp.h>
-#include <netinet/ip.h>
-#include <string.h>
-#include <event2/event.h>
-#include <assert.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <getopt.h>
-#include "pfring.h"
-#include "ssl_api.h"
-#include "gcm.h"
-
-#define FLOW_EXPIRE_SECS    10      // note: this is the time between TLS data packets...
-#define PCAP_FILTER_STR     "tcp and port 443"
-#define STEGO_DATA_LEN      200
-
-// Generic type used in a map[(ip,port)] -> flow.value
-// used for both TCP and UDP, though UDP only uses dst_packets and pcap_file.
-// Need to be uniform for cleanup to be able to loop through a single map (could do two maps, but they are very sparse)
-struct flow_t {
-    FILE *pcap_file;    // if non-null, write packets to this
-    struct packets *src_packets;
-    struct packets *dst_packets;
-
-    uint32_t    max_seq;    // TCP optimization: if we receive a higher seq than this, no need to check overlap (host-order)
-
-    struct timeval expire;
-};
-
-struct telex_state_st {
-    int sock;
-    //SSL *ssl;
-
-};
-
-struct flow {
-    // Key
-    struct flow *next;
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-
-    // Value
-    struct timeval expire;
-};
-
-// Linked list of keys
-struct flow_key {
-    struct flow_key *next;  // next key
-
-    struct flow *cur;
-};
-
-struct flow_map {
-    struct flow **map;  // actual map
-
-    struct flow_key *keys;
-};
-
-#define MAP_ENTRIES         (1<<18)
-#define HASH_IDX(src_ip,dst_ip,src_port,dst_port)   (((59*(dst_port^src_port))^(src_ip^dst_ip))%MAP_ENTRIES)
-
-struct stats_t {
-    uint64_t    tot_pkts;
-    uint32_t    cur_flows;
-    uint32_t    delta_bits;
-};
-
-struct config {
-    char    *dev;
-    pfring  *ring;
-    pcap_t  *pcap;
-    int     pcap_fd;
-    struct event_base *base;
-
-    struct event *status_ev;
-    struct event *pkt_ev;
-
-    struct stats_t  stats;
-
-    struct flow_map conn_map;
-
-    int pfring_id;
-};
+#include "station.h"
 
 struct flow *add_flow(struct flow_map *conn_map, struct flow *new_flow)
 {
@@ -241,6 +148,53 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
     return ret_len;
 }
 
+void init_telex_conn(struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
+                     char *tcp_data, char *stego_data, size_t stego_len)
+{
+    size_t master_key_len;
+    char *master_key;
+    unsigned char *server_random, *client_random;
+    struct in_addr x;
+    int i;
+    x.s_addr = iph->saddr;
+    printf("%lu : %s:%d -> ", stego_len, inet_ntoa(x), ntohs(th->source));
+    x.s_addr = iph->daddr;
+    printf("%s:%d : ", inet_ntoa(x), ntohs(th->dest));
+
+    // Unpack master key
+    master_key_len = stego_data[7];
+    if (master_key_len > stego_len - 8) {
+        master_key_len = stego_len - 8;
+    }
+    master_key = &stego_data[8];
+
+    // Unpack client/server randoms
+    server_random = (unsigned char*)&stego_data[8+master_key_len];
+    client_random = (unsigned char*)&stego_data[8+master_key_len+32];
+    
+
+    SSL *ssl;
+    ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e), server_random, client_random);
+
+    char *req_plaintext;
+    if (ssl_decrypt(ssl, tcp_data, tcp_len - 4*th->doff, &req_plaintext) < 0) {
+        return;
+    }
+
+    // Setup new TCP forge socket
+    // Attach SSL to it
+    // Send response "HTTP/1.1 299 OK SPTELEX\r\n"
+    // create new connection to socks/http proxy
+    // Setup bufferevents for both proxy and forge_socket/TLS and forward between
+    struct telex_st *state;
+    state = malloc(sizeof(struct telex_st));
+    if (state == NULL) {
+        printf("Error: out of memory\n");
+        return;
+    }
+    
+}
+
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
     struct config *conf = ptr;
@@ -320,63 +274,10 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     int extract_len = extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
 
     if (memcmp(stego_data, "SPTELEX", 7)==0) { // || ip_ptr->saddr == 0x236fd48d) {
-        size_t master_key_len;
-        char *master_key;
-        unsigned char *server_random, *client_random;
-        struct in_addr x;
-        x.s_addr = ip_ptr->saddr;
-        printf("%d : %s:%d -> ", extract_len, inet_ntoa(x), ntohs(th->source));
-        x.s_addr = ip_ptr->daddr;
-        printf("%s:%d : ", inet_ntoa(x), ntohs(th->dest));
 
-        master_key_len = stego_data[7];
-        if (master_key_len > extract_len - 8) {
-            master_key_len = extract_len - 8;
-        }
-        master_key = &stego_data[8];
-
-        server_random = (unsigned char*)&stego_data[8+master_key_len];
-        client_random = (unsigned char*)&stego_data[8+master_key_len+32];
-    
-
-        int i;
-        SSL* ssl;
-
-        ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e), server_random, client_random);
-        printf("%p\n", ssl);
-
-        EVP_AES_GCM_CTX *gctx = ssl->enc_read_ctx->cipher_data;
-        printf("key: ");
-        for (i=0; i<16; i++) {
-            printf("%02x", ((unsigned char*)gctx->gcm.key)[i]);
-        }
-        printf("\n");
-
-        char *req_plaintext;
-
-        printf("our master key: ");
-        for (i=0; i<ssl->session->master_key_length; i++) {
-            printf("%02x", ssl->session->master_key[i]);
-        }
-        printf("\n");
-        printf("our write ctx: %p\n", ssl->enc_write_ctx);
-
-
-        if (ssl_decrypt(ssl, tcp_data, tcp_len - 4*th->doff, &req_plaintext) < 0) {
-            printf("IV: ");
-            for (i=0; i<12; i++) {
-                printf("%02x", gctx->iv[i]);
-            }
-            printf("\nYi.c: ");
-            for (i=0; i<16; i++) {
-                printf("%02x", gctx->gcm.Yi.c[i]);
-            }
-            printf("\n");
-        } else {
-            printf("Got data: %s", req_plaintext);
-        }
-        //printf("stego data: %s\n", stego_data);
-    }
+        // Tagged connection
+        init_telex_conn(ip_ptr, th, tcp_len, tcp_data, stego_data, extract_len);
+   }
 
 }
 
@@ -518,6 +419,17 @@ void pkt_cb(evutil_socket_t fd, short what, void *ptr)
     handle_pkt(conf, &pkt_hdr, pkt);
 }
 
+void print_help(char *prog_name)
+{
+    printf("SPTelex Station\n\n"
+           "\tUsage: %s [options]\n"
+           "\t\t--iface IFACE, -i IFACE         interface to listen on (default eth0)\n"
+           "\t\t--file FNAME, -f FNAME          .pcap file to read from instead of listen\n"
+           "\t\t--pfring_id ID, -p ID           PF_RING cluster ID to use (default 0)\n"
+           "\t\t--verbosity LEVEL, -v LEVEL     verbosity level; 0=fatal, 5=trace (default 3)\n\n",
+            prog_name);
+}
+
 int main(int argc,char **argv)
 {
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -528,6 +440,10 @@ int main(int argc,char **argv)
 
     memset(&conf, 0, sizeof(conf));
     conf.dev = "eth0";
+    conf.pfring_id = 0;
+
+    LogOutputLevel(LOG_INFO); // show warnings and more severe
+    LogOutputStream(stdout);
 
     int c;
     int option_index = 0;
@@ -535,10 +451,11 @@ int main(int argc,char **argv)
         {"iface",   optional_argument, 0, 'i'},
         {"file", optional_argument, 0, 'f'},
         {"pfring_id", optional_argument, 0, 'p'},
+        {"verbosity", optional_argument, 0, 'v'},
         {0, 0, 0, 0}
     };
     while (1) {
-        c = getopt_long(argc, argv, "i:f:p:", long_options, &option_index);
+        c = getopt_long(argc, argv, "i:f:p:v:", long_options, &option_index);
         if (c == -1)
             break;
 
@@ -558,6 +475,12 @@ int main(int argc,char **argv)
         case 'p':
             conf.pfring_id = atoi(optarg);
             break;
+        case 'v':
+            LogOutputLevel(atoi(optarg));
+            break;
+        default:
+            print_help(argv[0]);
+            return -1;
         }
     }
 
