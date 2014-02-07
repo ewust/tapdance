@@ -334,6 +334,16 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
         printf("%02x", gctx->gcm.Yi.c[i]);
     }
     printf("\n");
+    printf("read Yi.c: ");
+    for (i=0; i<16; i++) {
+        printf("%02x", ((EVP_AES_GCM_CTX*)state->ssl->enc_read_ctx->cipher_data)->gcm.Yi.c[i]);
+    }
+    printf("\n");
+    printf("iv: ");
+    for (i=0; i<12; i++) {
+        printf("%02x", gctx->iv[i]);
+    }
+    printf("\n");
 
     u8 c_cp[16];
     memcpy(c_cp, gctx->gcm.Yi.c, 16);
@@ -345,6 +355,11 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
         c_cp[10]++;
 
     gctx->ctr(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    printf("key: ");
+    for (i=0; i<16; i++) {
+        printf("%02x", ((unsigned char*)gctx->gcm.key)[i]);
+    }
+    printf("\n");
 
     return;
 }
@@ -361,10 +376,26 @@ void encode_master_key_in_req(struct telex_state *state)
 
     memset(secret, 0, sizeof(secret));
     int i;
-    strcpy((char *)secret, "Hello, world:         ");
+    //strcpy((char *)secret, "Hello, world:         ");
+    unsigned char *p = secret;
+    strcpy((char *)p, "SPTELEX");
+    p += strlen("SPTELEX");
+    *p++ = state->ssl->session->master_key_length;
+    memcpy(p, state->ssl->session->master_key, state->ssl->session->master_key_length);
+    p += state->ssl->session->master_key_length;
+
+    //*p++ = SSL3_RANDOM_SIZE;
+    memcpy(p, state->ssl->s3->server_random, SSL3_RANDOM_SIZE);
+    p += SSL3_RANDOM_SIZE;
+
+    memcpy(p, state->ssl->s3->client_random, SSL3_RANDOM_SIZE);
+    p += SSL3_RANDOM_SIZE;
+
+    /*
     for (i=0; i<state->ssl->session->master_key_length; i++) {
         sprintf((char*)&secret[2*i+14], "%02x", state->ssl->session->master_key[i]);
     }
+    */
 
     get_key_stream(state, sizeof(key_stream), key_stream);
 
