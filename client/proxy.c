@@ -325,6 +325,8 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
     //int key_len = state->ssl->session->master_key_length;
     EVP_CIPHER_CTX *cipher = state->ssl->enc_write_ctx;
     EVP_AES_GCM_CTX *gctx = cipher->cipher_data;
+    GCM128_CONTEXT gcm;
+    memcpy(&gcm, &gctx->gcm, sizeof(gcm));
 
     memset(key_stream, 0, len);
 
@@ -354,7 +356,21 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
     if (c_cp[11] == 0x00)
         c_cp[10]++;
 
-    gctx->ctr(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    // ????
+    gcm.Yi.c[15]--;
+    gcm.Yi.c[11]++;
+    if (gcm.Yi.c[11] == 0x00)
+        gcm.Yi.c[10]++;
+
+    //printf("%p == %p?\n", gctx->ctr, gctx->gcm.block);
+    //gctx->ctr(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    //AES_ctr32_encrypt(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    //bsaes_ctr32_encrypt_blocks(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    //aesni_ctr32_encrypt_blocks(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+
+    CRYPTO_gcm128_encrypt(&gcm, key_stream, key_stream, len);
+
+
     printf("key: ");
     for (i=0; i<16; i++) {
         printf("%02x", ((unsigned char*)gctx->gcm.key)[i]);
