@@ -186,7 +186,7 @@ int telex_get_shared_secret(BIGNUM *client_dh_priv_key, BIGNUM *p, BIGNUM *serve
 //key: 32 bytes
 //iv: 16 bytes
 //mac_secret: 20 bytes
-SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite)
+SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite, unsigned char *server_random, unsigned char *client_random)
 {
     static SSL_CTX *ctx = 0;
     // TODO(ewust/SPTelex): probably having a single context is ok?
@@ -425,8 +425,8 @@ SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_s
         memcpy(&ssl->s3->tmp.key_block[120], read->iv, 16);
 #endif
         // TODO(ewust/SPTelex)
-        //memcpy(ssl->s3->client_random, client_random, 32);
-        //memcpy(ssl->s3->server_random, server_random, 32);
+        memcpy(ssl->s3->client_random, client_random, 32);
+        memcpy(ssl->s3->server_random, server_random, 32);
 
         if (!switch_to_telex_crypto(ssl, master_key,
                                     master_key_len, cipher_suite)) {
@@ -507,10 +507,15 @@ int switch_to_telex_crypto(SSL *ssl, char *master_key, size_t master_key_len,
       return 0;
     }
 
+
+    //tls1_final_finish_mac ?
+
 /* For TELEX_LEAK_KEY, we have to "consume" the client_finished message,
     (and "send" the server finished message). This will increase read/write_sequence,
     as well as change the working iv's for ssl->enc_{write,read}_ctx->iv */
    //TODO(ewust): set working iv's here (and possibly remove the following)
+
+
     ssl->s3->read_sequence[7] = '\x01';
     ssl->s3->write_sequence[7] = '\x01';
 

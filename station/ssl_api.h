@@ -38,7 +38,7 @@ int my_ssl_write(BIO *b, const char *in, int len);
 
 int my_ssl_read(BIO *b, char *out, int len);
 
-SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite);
+SSL* get_live_ssl_obj(char *master_key, size_t master_key_len, uint16_t cipher_suite, unsigned char *server_random, unsigned char *client_random);
 
 /* Given a "live" SSL object, change its secrets for communication via Telex. */
 int switch_to_telex_crypto(SSL *ssl, char *master_key, size_t master_key_len, uint16_t cipher_suite);
