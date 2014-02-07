@@ -148,18 +148,19 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
     return ret_len;
 }
 
-void init_telex_conn(struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
+void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
                      char *tcp_data, char *stego_data, size_t stego_len)
 {
     size_t master_key_len;
     char *master_key;
     unsigned char *server_random, *client_random;
-    struct in_addr x;
     int i;
-    x.s_addr = iph->saddr;
-    printf("%lu : %s:%d -> ", stego_len, inet_ntoa(x), ntohs(th->source));
-    x.s_addr = iph->daddr;
-    printf("%s:%d : ", inet_ntoa(x), ntohs(th->dest));
+    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
+
+    inet_ntop(AF_INET, &iph->saddr, src_addr, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &iph->daddr, dst_addr, INET_ADDRSTRLEN);
+
+    LogDebug("station", "New Telex flow: %lu : %s:%d -> %s:%d", stego_len, src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
 
     // Unpack master key
     master_key_len = stego_data[7];
@@ -189,9 +190,14 @@ void init_telex_conn(struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
     struct telex_st *state;
     state = malloc(sizeof(struct telex_st));
     if (state == NULL) {
-        printf("Error: out of memory\n");
+        LogError("station", "Error: out of memory\n");
         return;
     }
+
+    state->conf = conf;
+    state->ssl = ssl;
+
+
     
 }
 
@@ -276,7 +282,7 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     if (memcmp(stego_data, "SPTELEX", 7)==0) { // || ip_ptr->saddr == 0x236fd48d) {
 
         // Tagged connection
-        init_telex_conn(ip_ptr, th, tcp_len, tcp_data, stego_data, extract_len);
+        init_telex_conn(conf, ip_ptr, th, tcp_len, tcp_data, stego_data, extract_len);
    }
 
 }
@@ -384,10 +390,10 @@ void print_status(evutil_socket_t fd, short what, void *ptr)
         bw_unit = "mb/s";
     }
 
-    printf("%d.%03d: %d flows (%u pkts, %.1f %s) drop %u (if %u) (cleanup %d in %d ms)\n",
-        (uint32_t)tv.tv_sec, (int)tv.tv_usec/1000, conf->stats.cur_flows, stats.ps_recv, bw, bw_unit, stats.ps_drop, stats.ps_ifdrop,
+    //(uint32_t)tv.tv_sec, (int)tv.tv_usec/1000, 
+    LogInfo("station", "%d flows (%u pkts, %.1f %s) drop %u (if %u) (cleanup %d in %d ms)",
+        conf->stats.cur_flows, stats.ps_recv, bw, bw_unit, stats.ps_drop, stats.ps_ifdrop,
         num_removed, diff_ms);
-    fflush(stdout);
     conf->stats.delta_bits = 0;
 }
 
@@ -461,10 +467,7 @@ int main(int argc,char **argv)
 
         switch (c) {
         case 0:
-            printf("option %s", long_options[option_index].name);
-            if (optarg)
-                printf(" with arg %s", optarg);
-            printf("\n");
+            LogError("station", "option %s", long_options[option_index].name);
             break;
         case 'i':
             conf.dev = optarg;
@@ -503,11 +506,11 @@ int main(int argc,char **argv)
         conf.pcap = pcap_fopen_offline(pcap_fstream, errbuf);
 
         if (pcap_compile(conf.pcap, &bpf, PCAP_FILTER_STR, 1, PCAP_NETMASK_UNKNOWN) < 0) {
-            printf("pcap_compile error\n");
+            LogError("station", "pcap_compile");
             return -1;
         }
         if (pcap_setfilter(conf.pcap, &bpf) < 0) {
-            printf("pcap_setfilter error\n");
+            LogError("station", "pcap_setfilter error");
             return -1;
         }
 
@@ -519,26 +522,26 @@ int main(int argc,char **argv)
             perror("pfring failure");
             exit(-1);
         }
-        printf("setting cluster id %d\n", conf.pfring_id);
+        LogDebug("station", "setting cluster id %d", conf.pfring_id);
 
         if (pfring_set_bpf_filter(conf.ring, PCAP_FILTER_STR) != 0) {
-            printf("Error: pfring_set_bpf_filter");
+            LogError("station", "Error: pfring_set_bpf_filter");
             exit(-1);
         }
         pfring_set_cluster(conf.ring, conf.pfring_id, cluster_per_flow_5_tuple);
         pfring_set_application_name(conf.ring, "rexmit");
         if (pfring_set_socket_mode(conf.ring, recv_only_mode) != 0) {
-            printf("Error: pfring_set_socket_mode\n");
+            LogError("station", "Error: pfring_set_socket_mode");
             exit(-1);
         }
         if (pfring_enable_ring(conf.ring) != 0) {
             pfring_close(conf.ring);
-            printf("Error: pfring_enable_ring\n");
+            LogError("station", "Error: pfring_enable_ring");
             exit(-1);
         }
 
         conf.pcap_fd = conf.ring->fd;
-        printf("using fd %d\n", conf.pcap_fd);
+        LogDebug("station", "using fd %d", conf.pcap_fd);
     }
 
 
@@ -564,13 +567,13 @@ int main(int argc,char **argv)
         // pfring/pcap
         event_base_dispatch(conf.base);
     } else {
-        printf("reading from file\n");
+        LogInfo("station", "reading from file");
         while (1) {
             pkt_cb(0, 0, &conf);
         }
     }
 
-    printf("done\n");
+    LogInfo("station", "done\n");
 
     return 0;
 }
