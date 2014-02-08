@@ -95,6 +95,8 @@ struct config {
     struct flow_map conn_map;
 
     int pfring_id;
+
+    struct sockaddr_in proxy_addr_sin;
 };
 
 

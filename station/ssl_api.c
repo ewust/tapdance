@@ -89,8 +89,8 @@ int ssl_decrypt(SSL *s, const char *in, int len, char **out)
     i = 0;
     int ret = SSL_read(s, *out + i, len - i);
     i += ret;  // If <= 0, we return it; o.w. we should accumulate.
-    fprintf(stderr, "first SSL_read returned: %d\n", ret);
-    fflush(stderr);
+    //fprintf(stderr, "first SSL_read returned: %d\n", ret);
+    //fflush(stderr);
     while (ret > 0 && !BIO_eof(rbio) && i < len) {
       ret = SSL_read(s, *out + i, len - i);
       fprintf(stderr, "SSL_read returned: %d\n", ret);

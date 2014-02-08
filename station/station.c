@@ -1,4 +1,6 @@
+#include <event2/bufferevent_ssl.h>
 #include "station.h"
+#include "libforge_socket.h"
 
 struct flow *add_flow(struct flow_map *conn_map, struct flow *new_flow)
 {
@@ -100,6 +102,19 @@ int is_tls_data_packet(struct tcphdr *th, size_t tcp_len)
     return ((tcp_len > 1) && ((*data) == '\x17'));
 }
 
+void eventcb(struct bufferevent *bev, short events, void *arg)
+{
+
+}
+
+
+
+void readcb(struct bufferevent *bev, void *arg)
+{
+
+}
+
+
 int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
 {
     int ret_len = 0;
@@ -196,10 +211,55 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
 
     state->conf = conf;
     state->ssl = ssl;
+    state->client_sock = socket(AF_INET, SOCK_FORGE, 0);
+    if (state->client_sock < 0) {
+        perror("(forge_)socket");
+    }
+
+    struct tcp_state *tcp_st = forge_socket_get_default_state();
+    tcp_st->src_ip  = iph->daddr;
+    tcp_st->dst_ip  = iph->saddr;
+    tcp_st->sport   = th->source;
+    tcp_st->dport   = th->dest;
+    tcp_st->seq     = th->ack;
+    tcp_st->ack     = th->seq + (tcp_len - 4*th->doff);
+
+    forge_socket_set_state(state->client_sock, tcp_st);
+
+    free(tcp_st);
+
+    evutil_make_socket_nonblocking(state->client_sock);
 
 
-    
+    // Setup proxy connection
+    state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
+    bufferevent_setcb(state->proxy_bev, readcb, NULL, eventcb, state);
+    if (bufferevent_socket_connect(state->proxy_bev, 
+            (struct sockaddr *)&conf->proxy_addr_sin, sizeof(struct sockaddr_in)) < 0) {
+        LogError("station", "Bufferevent_socket_connect failed for connecting to proxy");
+        bufferevent_free(state->proxy_bev);
+        free(state);
+        return;
+    }
+
+    // change SSL bio to use our forge_socket
+    BIO *bio = BIO_new_socket(state->client_sock, BIO_NOCLOSE);
+    SSL_set_bio(state->ssl, bio, bio);
+
+    // Setup client "connection" 
+    // TODO: maybe don't use BEV_OPT_CLOSE_ON_FREE, so we can shut it down cleanly
+    state->client_bev = bufferevent_openssl_socket_new(conf->base, 
+                                                       state->client_sock,
+                                                       state->ssl,
+                                                       BUFFEREVENT_SSL_OPEN,
+                                                       BEV_OPT_CLOSE_ON_FREE);
+    bufferevent_setcb(state->client_bev, readcb, NULL, eventcb, state);
+
+    // Write the ACK mesage!
+    evbuffer_add_printf(bufferevent_get_output(state->client_bev), "I GOT CHUUUUUU\r\n\r\n");
+
 }
+    
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
@@ -432,6 +492,7 @@ void print_help(char *prog_name)
            "\t\t--iface IFACE, -i IFACE         interface to listen on (default eth0)\n"
            "\t\t--file FNAME, -f FNAME          .pcap file to read from instead of listen\n"
            "\t\t--pfring_id ID, -p ID           PF_RING cluster ID to use (default 0)\n"
+           "\t\t--proxy HOST:PORT -c HOST:PORT  host (ipv4 address) to connect to for each new HTTP proxy (default 127.0.0.1:8123)\n"
            "\t\t--verbosity LEVEL, -v LEVEL     verbosity level; 0=fatal, 5=trace (default 3)\n\n",
             prog_name);
 }
@@ -443,10 +504,14 @@ int main(int argc,char **argv)
     struct bpf_program bpf;
     char *pcap_fname = NULL;
     FILE *pcap_fstream;
+    char *pstr = NULL;
 
     memset(&conf, 0, sizeof(conf));
     conf.dev = "eth0";
     conf.pfring_id = 0;
+    conf.proxy_addr_sin.sin_family = AF_INET;
+    conf.proxy_addr_sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+    conf.proxy_addr_sin.sin_port = htons(8123);
 
     LogOutputLevel(LOG_INFO); // show warnings and more severe
     LogOutputStream(stdout);
@@ -458,10 +523,11 @@ int main(int argc,char **argv)
         {"file", optional_argument, 0, 'f'},
         {"pfring_id", optional_argument, 0, 'p'},
         {"verbosity", optional_argument, 0, 'v'},
+        {"proxy", optional_argument, 0, 'c'},
         {0, 0, 0, 0}
     };
     while (1) {
-        c = getopt_long(argc, argv, "i:f:p:v:", long_options, &option_index);
+        c = getopt_long(argc, argv, "i:f:p:v:c:", long_options, &option_index);
         if (c == -1)
             break;
 
@@ -481,6 +547,19 @@ int main(int argc,char **argv)
         case 'v':
             LogOutputLevel(atoi(optarg));
             break;
+        case 'c':
+
+            conf.proxy_addr_sin.sin_addr.s_addr = inet_addr(strtok(optarg, ":"));
+            pstr = strtok(NULL, ":");
+            if (pstr) {
+                int port = strtol(pstr, NULL, 10);
+                if (port < 1 || port > 65535) {
+                    fprintf(stderr, "Invalid remote port: %d", port);
+                    return 1;
+                }
+                conf.proxy_addr_sin.sin_port = htons(port);
+            }
+            break;
         default:
             print_help(argv[0]);
             return -1;
@@ -488,6 +567,8 @@ int main(int argc,char **argv)
     }
 
 
+    LogDebug("station", "using proxy host %s:%d", inet_ntoa(conf.proxy_addr_sin.sin_addr),
+             ntohs(conf.proxy_addr_sin.sin_port));
 
     //pcap_lookupnet(dev, &pNet, &pMask, errbuf);
     if (pcap_fname != NULL) {
