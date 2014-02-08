@@ -216,13 +216,17 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         perror("(forge_)socket");
     }
 
+    //return;
+
     struct tcp_state *tcp_st = forge_socket_get_default_state();
     tcp_st->src_ip  = iph->daddr;
     tcp_st->dst_ip  = iph->saddr;
-    tcp_st->sport   = th->source;
-    tcp_st->dport   = th->dest;
-    tcp_st->seq     = th->ack;
-    tcp_st->ack     = th->seq + (tcp_len - 4*th->doff);
+    tcp_st->sport   = th->dest;
+    tcp_st->dport   = th->source;
+    tcp_st->seq     = ntohl(th->ack_seq);   // There is no good reason why these are little endian, and the rest are big...
+    tcp_st->ack     = ntohl(th->seq) + (tcp_len - 4*th->doff);
+
+    LogDebug("station", "setting seq to %08x == %08x", tcp_st->seq, th->ack);
 
     forge_socket_set_state(state->client_sock, tcp_st);
 
