@@ -226,8 +226,6 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     tcp_st->seq     = ntohl(th->ack_seq);   // There is no good reason why these are little endian, and the rest are big...
     tcp_st->ack     = ntohl(th->seq) + (tcp_len - 4*th->doff);
 
-    LogDebug("station", "setting seq to %08x == %08x", tcp_st->seq, th->ack);
-
     forge_socket_set_state(state->client_sock, tcp_st);
 
     free(tcp_st);
