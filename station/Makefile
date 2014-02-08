@@ -1,7 +1,7 @@
 
-CFLAGS+=-I../../forge_socket/ -g #-O2
+CFLAGS+=-I../../forge_socket/ -I/usr/include -g #-O2
 #LDFLAGS+=-lpcap -L/usr/local/lib -lcrypto -lssl -levent -levent_openssl ../../PF_RING/userland/lib/libpfring.a -lm
-LDFLAGS=-lpcap -L/usr/lib -lcrypto -lssl -levent -levent_openssl -lssl -lpfring #../../PF_RING/userland/lib/libpfring.a -lm
+LDFLAGS=-L/usr/lib -lpcap -lcrypto -lssl -levent_core -levent_extra -lpfring -ldl /usr/lib/libevent_openssl.a #../../PF_RING/userland/lib/libpfring.a -lm
 
 all: station
 
