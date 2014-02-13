@@ -111,7 +111,22 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
 
 void readcb(struct bufferevent *bev, void *arg)
 {
+    struct telex_st *state = arg;
+    struct config *conf = state->conf;
+    struct bufferevent *other_bev;
 
+    if (bev == state->client_bev) {
+        other_bev = state->proxy_bev;
+    } else {
+        other_bev = state->client_bev;
+    }
+
+    struct evbuffer *src = bufferevent_get_input(bev);
+    struct evbuffer *dst = bufferevent_get_output(other_bev);
+    evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
+    //evbuffer_add_printf(dst, "wtf\n");
+
+    LogDebug("station", "readcb woooo");
 }
 
 
@@ -236,32 +251,34 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     // Setup proxy connection
     state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
     bufferevent_setcb(state->proxy_bev, readcb, NULL, eventcb, state);
-    if (bufferevent_socket_connect(state->proxy_bev, 
+    if (bufferevent_socket_connect(state->proxy_bev,
             (struct sockaddr *)&conf->proxy_addr_sin, sizeof(struct sockaddr_in)) < 0) {
         LogError("station", "Bufferevent_socket_connect failed for connecting to proxy");
         bufferevent_free(state->proxy_bev);
         free(state);
         return;
     }
+    // bufferevent_socket_connect doesn't do this?
+    bufferevent_enable(state->proxy_bev, EV_READ);
 
     // change SSL bio to use our forge_socket
     BIO *bio = BIO_new_socket(state->client_sock, BIO_NOCLOSE);
     SSL_set_bio(state->ssl, bio, bio);
 
-    // Setup client "connection" 
+    // Setup client "connection"
     // TODO: maybe don't use BEV_OPT_CLOSE_ON_FREE, so we can shut it down cleanly
-    state->client_bev = bufferevent_openssl_socket_new(conf->base, 
+    state->client_bev = bufferevent_openssl_socket_new(conf->base,
                                                        state->client_sock,
                                                        state->ssl,
                                                        BUFFEREVENT_SSL_OPEN,
                                                        BEV_OPT_CLOSE_ON_FREE);
     bufferevent_setcb(state->client_bev, readcb, NULL, eventcb, state);
+    bufferevent_enable(state->client_bev, EV_READ);
 
     // Write the ACK mesage!
     evbuffer_add_printf(bufferevent_get_output(state->client_bev), "I GOT CHUUUUUU\r\n\r\n");
 
 }
-    
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
@@ -612,7 +629,7 @@ int main(int argc,char **argv)
             exit(-1);
         }
         pfring_set_cluster(conf.ring, conf.pfring_id, cluster_per_flow_5_tuple);
-        pfring_set_application_name(conf.ring, "rexmit");
+        pfring_set_application_name(conf.ring, "station");
         if (pfring_set_socket_mode(conf.ring, recv_only_mode) != 0) {
             LogError("station", "Error: pfring_set_socket_mode");
             exit(-1);
