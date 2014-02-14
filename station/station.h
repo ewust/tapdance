@@ -84,6 +84,7 @@ struct config {
     char    *dev;
     pfring  *ring;
     pcap_t  *pcap;
+    int     raw_sock;
     int     pcap_fd;
     struct event_base *base;
 
@@ -109,6 +110,8 @@ struct telex_st {
     int proxy_sock;
     uint64_t id;
     char name[32];
+
+    char rst_pkt[sizeof(struct iphdr)+sizeof(struct tcphdr)];
 
     struct bufferevent *client_bev;
     struct bufferevent *proxy_bev;
