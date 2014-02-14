@@ -112,6 +112,7 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
 void readcb(struct bufferevent *bev, void *arg)
 {
 
+    LogDebug("station", "got read cb");
 }
 
 
@@ -161,6 +162,42 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
             break;
     }
     return ret_len;
+}
+
+// Returns 1 if there is a tcp timestamp option present, and sets ts_val and ts_ecr respectively
+// Returns 0 otherwise
+int get_tcp_ts_val(struct tcphdr *th, uint32_t *ts_val, uint32_t *ts_ecr)
+{
+    unsigned char *opts = (unsigned char *)(&th[1]);
+    size_t opts_len = 4*th->doff - sizeof(struct tcphdr);
+    unsigned char kind, cur_opt_len;
+    int i = 0;
+    while (i < opts_len) {
+        kind = opts[i];
+        if (kind == 0x00) {
+            break;
+        }
+
+        if (kind == 0x01) {
+            // NOP, no opt_len
+            i++;
+            continue;
+        }
+
+        cur_opt_len = opts[i+1];
+
+        if (kind == 0x08) {
+            // TCP timestamp
+            if (ts_val)
+                *ts_val = ntohl(*(uint32_t*)(&opts[i+2]));
+            if (ts_ecr)
+                *ts_ecr = ntohl(*(uint32_t*)(&opts[i+6]));
+            return 1;
+        }
+        
+        i += cur_opt_len;
+    }
+    return 0;
 }
 
 void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
@@ -225,6 +262,21 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     tcp_st->dport   = th->source;
     tcp_st->seq     = ntohl(th->ack_seq);   // There is no good reason why these are little endian, and the rest are big...
     tcp_st->ack     = ntohl(th->seq) + (tcp_len - 4*th->doff);
+
+    tcp_st->snd_una = tcp_st->seq;
+    // TODO: options based on flow
+    tcp_st->sack_ok = 1;
+    tcp_st->wscale_ok = 1;
+    tcp_st->snd_wscale = 7;
+    tcp_st->rcv_wscale = 10;
+    tcp_st->rcv_wnd = 139;
+    tcp_st->snd_wnd = 5;
+
+    tcp_st->tstamp_ok = get_tcp_ts_val(th, &tcp_st->ts_recent, &tcp_st->ts_val);
+    tcp_st->tstamp_ok = 0;
+    tcp_st->ts_val += 100;
+
+    tcp_st->mss_clamp = 1460;
 
     forge_socket_set_state(state->client_sock, tcp_st);
 
