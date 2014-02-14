@@ -27,6 +27,7 @@
 #include "util.h"
 #include "gcm.h"
 
+void first_read_cb(struct bufferevent *bev, struct telex_state *state);
 static void read_cb(struct bufferevent *, struct telex_state *);
 static void event_cb(struct bufferevent *, short, struct telex_state *);
 static void drained_write_cb(struct bufferevent *, struct telex_state *);
@@ -224,7 +225,10 @@ void proxy_accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 	}
 	_inc(BEV);
 
-	bufferevent_setcb(state->remote, (bufferevent_data_cb)read_cb, NULL,
+	//bufferevent_setcb(state->remote, (bufferevent_data_cb)read_cb, NULL,
+	//	(bufferevent_event_cb)event_cb, state);
+    // First, set our read_cb to something that receives the "SPTELEX OK" message
+	bufferevent_setcb(state->remote, (bufferevent_data_cb)first_read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
 	bufferevent_setcb(state->local, (bufferevent_data_cb)read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
@@ -235,10 +239,43 @@ void proxy_accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 #define PARTY(bev, state) (ISLOCAL((bev),(state)) ? "local" : \
 	(ISREMOTE((bev),(state)) ? "remote" : "other" ))
 
+#define TELEX_OK_MSG "SPTELEX OK"
+
+void first_read_cb(struct bufferevent *bev, struct telex_state *state)
+{
+    struct evbuffer *src = bufferevent_get_input(bev);
+    char ok_msg[strlen(TELEX_OK_MSG)+1];
+    if (evbuffer_get_length(src) < strlen(TELEX_OK_MSG)) {
+        return;
+    }
+
+    LogTrace(state->name, "first_read %d bytes", evbuffer_get_length(src));
+
+    evbuffer_remove(src, ok_msg, sizeof(ok_msg)-1);
+    ok_msg[strlen(TELEX_OK_MSG)] = '\0';
+
+    if (strcmp(ok_msg, TELEX_OK_MSG)) {
+        // Not Telex, end this connection
+        LogWarn(state->name, "Failed to get a SPTELEX OK message (not using a Telex server, or it's not running?) Got: %s", ok_msg);
+        //cleanup
+        StateCleanup(&state);
+        return;
+    }
+
+    LogTrace(state->name, "Got SPTELEX");
+
+    // Set up to start passing between proxy and client
+	bufferevent_setcb(state->remote, (bufferevent_data_cb)read_cb, NULL,
+		(bufferevent_event_cb)event_cb, state);
+
+    // Allow local proxy to start sending data
+	bufferevent_enable(state->local,  EV_READ|EV_WRITE);
+}
+
 void read_cb(struct bufferevent *bev, struct telex_state *state)
 {
 	struct bufferevent *partner = 
-			ISLOCAL(bev,state) ? state->remote : state->local;		
+			ISLOCAL(bev,state) ? state->remote : state->local;
 
 	struct evbuffer *src = bufferevent_get_input(bev);
 	size_t len = evbuffer_get_length(src);
@@ -260,17 +297,17 @@ void read_cb(struct bufferevent *bev, struct telex_state *state)
 		return;
 	}
 
-	struct evbuffer *dst = bufferevent_get_output(partner);		
+	struct evbuffer *dst = bufferevent_get_output(partner);
 	evbuffer_add_buffer(dst, src); // copy from input to output
 
 	if (evbuffer_get_length(dst) >= MAX_OUTPUT_BUFFER) {
 		LogDebug(state->name, "PAUSING (dst: %d bytes)", 
 			evbuffer_get_length(dst));
 		bufferevent_setcb(partner,
-			(bufferevent_data_cb)read_cb, 
+			(bufferevent_data_cb)read_cb,
 			(bufferevent_data_cb)drained_write_cb,
 			(bufferevent_event_cb)event_cb, state);
-		bufferevent_setwatermark(partner, EV_WRITE, 
+		bufferevent_setwatermark(partner, EV_WRITE,
 				MAX_OUTPUT_BUFFER/2, MAX_OUTPUT_BUFFER);
 		bufferevent_disable(bev, EV_READ);
 	}
@@ -279,9 +316,9 @@ void read_cb(struct bufferevent *bev, struct telex_state *state)
 void drained_write_cb(struct bufferevent *bev, struct telex_state *state)
 {
 	LogDebug(state->name, "DRAINING %s", PARTY(bev,state));
-	struct bufferevent *partner = 
-			ISLOCAL(bev,state) ? state->remote : state->local;		
-	bufferevent_setcb(bev, (bufferevent_data_cb)read_cb, NULL, 
+	struct bufferevent *partner =
+			ISLOCAL(bev,state) ? state->remote : state->local;
+	bufferevent_setcb(bev, (bufferevent_data_cb)read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
 	bufferevent_setwatermark(bev, EV_WRITE, 0, 0);
 	if (partner) {
@@ -321,7 +358,6 @@ static void show_connection_error(struct bufferevent *bev, struct telex_state *s
 
 void get_key_stream(struct telex_state *state, int len, unsigned char *key_stream)
 {
-    int i;
     //int key_len = state->ssl->session->master_key_length;
     EVP_CIPHER_CTX *cipher = state->ssl->enc_write_ctx;
     EVP_AES_GCM_CTX *gctx = cipher->cipher_data;
@@ -330,6 +366,7 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
 
     memset(key_stream, 0, len);
 
+#if 0
     printf("%p and %d byte ivlen Yi.c: ", gctx->ctr, gctx->ivlen);
 
     for (i=0; i<16; i++) {
@@ -346,6 +383,7 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
         printf("%02x", gctx->iv[i]);
     }
     printf("\n");
+#endif
 
     u8 c_cp[16];
     memcpy(c_cp, gctx->gcm.Yi.c, 16);
@@ -368,14 +406,11 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
     //bsaes_ctr32_encrypt_blocks(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
     //aesni_ctr32_encrypt_blocks(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
 
-    CRYPTO_gcm128_encrypt(&gcm, key_stream, key_stream, len);
-
-
-    printf("key: ");
-    for (i=0; i<16; i++) {
-        printf("%02x", ((unsigned char*)gctx->gcm.key)[i]);
+    if (gctx->ctr) {
+        gctx->ctr(key_stream, key_stream, len/16, gctx->gcm.key, c_cp);
+    } else {
+        CRYPTO_gcm128_encrypt(&gcm, key_stream, key_stream, len);
     }
-    printf("\n");
 
     return;
 }
@@ -391,7 +426,6 @@ void encode_master_key_in_req(struct telex_state *state)
     int req_idx;
 
     memset(secret, 0, sizeof(secret));
-    int i;
     //strcpy((char *)secret, "Hello, world:         ");
     unsigned char *p = secret;
     strcpy((char *)p, "SPTELEX");
@@ -459,9 +493,6 @@ void encode_master_key_in_req(struct telex_state *state)
 
     } while (secret_idx < secret_len);
 
-    printf("=========\n");
-    printf("%s\n", req);
-
     //memcpy(&req[strlen(req_start)], state->ssl->session->master_key, key_len);
     //strcpy(&req[strlen(req_start)+256], "\r\n\r\n");
 
@@ -479,14 +510,8 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 	if (events & BEV_EVENT_CONNECTED) {
 		LogTrace(state->name, "EVENT_CONNECTED %s", PARTY(bev,state));
 		LogTrace(state->name, "SSL state: %s", SSL_state_string_long(state->ssl));
-        int i;
-        printf("\n");
-        for (i=0; i< state->ssl->session->master_key_length; i++) {
-            printf("%02x", state->ssl->session->master_key[i]);
-        }
-        printf("\n");
+
         encode_master_key_in_req(state);
-		bufferevent_enable(state->local,  EV_READ|EV_WRITE);
 		bufferevent_enable(state->remote, EV_READ|EV_WRITE);
 		return;
 
