@@ -13,6 +13,7 @@ struct tcp_state *forge_socket_get_default_state()
 {
     struct tcp_state *st;
     st = malloc(sizeof(struct tcp_state));
+    memset(st, 0, sizeof(struct tcp_state));
     if (st == NULL) {
         return NULL;
     }
