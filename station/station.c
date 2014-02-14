@@ -2,6 +2,8 @@
 #include "station.h"
 #include "libforge_socket.h"
 
+void send_rst_pkt(struct telex_st *state);
+
 struct flow *add_flow(struct flow_map *conn_map, struct flow *new_flow)
 {
     struct flow *cur;
@@ -161,9 +163,11 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
                 // readcb(bev, state);
             }
         }
+        send_rst_pkt(state);
         cleanup_telex(&state);
     } else if (events & BEV_EVENT_ERROR) {
         LogWarn(state->name, "%s EVENT_ERROR", PARTY(bev, state));
+        send_rst_pkt(state);
         cleanup_telex(&state);
     }
 
@@ -234,6 +238,63 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
             break;
     }
     return ret_len;
+}
+
+uint16_t csum(uint16_t *buf, int nwords, uint32_t init_sum)
+{
+    uint32_t sum;
+
+    for (sum=init_sum; nwords>0; nwords--) {
+        sum += ntohs(*buf++);
+    }
+    sum = (sum >> 16) + (sum &0xffff);
+    sum += (sum >> 16);
+    return (uint16_t)(~sum);
+}
+
+
+void make_rst_pkt(struct telex_st *state, uint32_t saddr, uint32_t daddr, uint16_t sport, uint16_t dport, uint32_t seq)
+{
+    size_t tot_len = sizeof(struct iphdr) + sizeof(struct tcphdr);
+    struct iphdr *iph = (struct iphdr*)state->rst_pkt;
+    struct tcphdr *th = (struct tcphdr*)(&iph[1]);
+
+    memset(iph, 0, sizeof(struct iphdr));
+    iph->ihl = sizeof(struct iphdr) >> 2;
+    iph->version     = 4;
+    iph->tot_len     = htons(tot_len);
+    iph->frag_off    = htons(0x4000); //don't fragment
+    iph->ttl         = 64;
+    iph->id          = htons(1337);
+    iph->protocol    = IPPROTO_TCP;
+    iph->saddr       = saddr;
+    iph->daddr       = daddr;
+
+    //fill in tcp header
+    memset(th, 0, sizeof(struct tcphdr));
+    th->source     = sport;
+    th->dest       = dport;
+    th->seq        = seq;
+    th->doff       = sizeof(struct tcphdr) >> 2;
+    th->rst        = 1;
+    th->window     = htons(4096);
+
+    // checksums
+    th->check = tcp_checksum(sizeof(struct tcphdr), saddr, daddr, th);
+    iph->check = htons(csum((uint16_t *)iph, iph->ihl*2, 0));
+}
+
+void send_rst_pkt(struct telex_st *state)
+{
+    struct iphdr *iph = (struct iphdr*)state->rst_pkt;
+    struct tcphdr *th = (struct tcphdr*)(&iph[1]);
+    struct sockaddr_in sin;
+
+    sin.sin_family = AF_INET;
+    sin.sin_port = th->dest;
+    sin.sin_addr.s_addr = iph->daddr;
+
+    int res = sendto(state->conf->raw_sock, iph, sizeof(struct iphdr) + sizeof(struct tcphdr), 0, (struct sockaddr*)&sin, sizeof(sin));
 }
 
 // Returns 1 if there is a tcp timestamp option present, and sets ts_val and ts_ecr respectively
@@ -331,13 +392,14 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         cleanup_telex(&state);
     }
 
+    uint32_t server_ack = ntohl(th->seq) + (tcp_len - 4*th->doff);  // host order
     struct tcp_state *tcp_st = forge_socket_get_default_state();
     tcp_st->src_ip  = iph->daddr;
     tcp_st->dst_ip  = iph->saddr;
     tcp_st->sport   = th->dest;
     tcp_st->dport   = th->source;
     tcp_st->seq     = ntohl(th->ack_seq);   // There is no good reason why these are little endian, and the rest are big...
-    tcp_st->ack     = ntohl(th->seq) + (tcp_len - 4*th->doff);
+    tcp_st->ack     = server_ack;
 
     tcp_st->snd_una = tcp_st->seq;
     // TODO: options based on flow
@@ -364,6 +426,9 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     forge_socket_set_state(state->client_sock, tcp_st);
     evutil_make_socket_nonblocking(state->client_sock);
     free(tcp_st);
+
+    // Prepare (but don't send) RST packet for server once we need to tear-down connection
+    make_rst_pkt(state, iph->saddr, iph->daddr, th->source, th->dest, htonl(server_ack));
 
     // Setup proxy connection
     state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
@@ -774,6 +839,12 @@ int main(int argc,char **argv)
 
     // Init map
     conf.conn_map.map = calloc(sizeof(struct flow*), MAP_ENTRIES);
+
+    // Init raw sock
+    conf.raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (conf.raw_sock < 0) {
+        LogError("station", "could not open raw sock for sending RSTs");
+    }
 
 
     if (pcap_fname == NULL) {
