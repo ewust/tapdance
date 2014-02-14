@@ -97,6 +97,8 @@ struct config {
     int pfring_id;
 
     struct sockaddr_in proxy_addr_sin;
+    uint64_t num_tunnels;
+    uint32_t num_open_tunnels;
 };
 
 
@@ -105,6 +107,8 @@ struct telex_st {
     SSL *ssl;
     int client_sock;
     int proxy_sock;
+    uint64_t id;
+    char name[32];
 
     struct bufferevent *client_bev;
     struct bufferevent *proxy_bev;
