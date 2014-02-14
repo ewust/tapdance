@@ -341,6 +341,10 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
 
     tcp_st->snd_una = tcp_st->seq;
     // TODO: options based on flow
+    // where are we going to get these values?
+    // The client can send us some if they can get it
+    // from userspace, otherwise we can only know client window
+    // scale from SYN; can't be guaranteed to get SYN-ACK
     tcp_st->sack_ok = 1;
     tcp_st->wscale_ok = 1;
     tcp_st->snd_wscale = 7;
@@ -348,17 +352,18 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     tcp_st->rcv_wnd = 139;
     tcp_st->snd_wnd = 5;
 
-    tcp_st->tstamp_ok = get_tcp_ts_val(th, &tcp_st->ts_recent, &tcp_st->ts_val);
+    //tcp_st->tstamp_ok = get_tcp_ts_val(th, &tcp_st->ts_recent, &tcp_st->ts_val);
+    // TODO: update kernel to one that uses tcp_sk(sk)->tsoffset for each sock;
+    // 3.5 uses jiffies as a global timestamp. v3.9 looks like it adds in a sock-specific
+    // tsoffset that we could use to get what we want. v3.9 might have other goodies, too...
     tcp_st->tstamp_ok = 0;
-    tcp_st->ts_val += 100;
+    //tcp_st->ts_val += 100;
 
     tcp_st->mss_clamp = 1460;
 
     forge_socket_set_state(state->client_sock, tcp_st);
-
-    free(tcp_st);
-
     evutil_make_socket_nonblocking(state->client_sock);
+    free(tcp_st);
 
     // Setup proxy connection
     state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
