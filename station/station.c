@@ -102,16 +102,90 @@ int is_tls_data_packet(struct tcphdr *th, size_t tcp_len)
     return ((tcp_len > 1) && ((*data) == '\x17'));
 }
 
+void cleanup_telex(struct telex_st **_state)
+{
+    if (!_state) {
+        return;
+    }
+    struct telex_st *state = *_state;
+    *_state = NULL;
+
+    LogTrace(state->name, "cleanup");
+
+    if (state->client_bev) {
+        bufferevent_free(state->client_bev);
+        state->client_bev = NULL;
+    }
+
+    if (state->proxy_bev) {
+        bufferevent_free(state->proxy_bev);
+        state->proxy_bev = NULL;
+    }
+
+    if (state->ssl) {
+        SSL_free(state->ssl);
+        state->ssl = NULL;
+    }
+
+    state->conf->num_open_tunnels--;
+    LogDebug(state->name, "Closed");
+
+    free(state);
+}
+
+#define ISCLIENT(bev, state) ((bev) == (state)->client_bev)
+#define ISPROXY(bev, state) ((bev) == (state)->proxy_bev)
+#define PARTY(bev, state) (ISCLIENT((bev),(state)) ? "client" : \
+    (ISPROXY((bev),(state)) ? "proxy" : "other" ))
+#define OTHER_BEV(bev, state) (ISCLIENT((bev),(state)) ? state->proxy_bev : \
+    (ISPROXY((bev),(state)) ? state->client_bev : NULL ))
+
 void eventcb(struct bufferevent *bev, short events, void *arg)
 {
+    struct telex_st *state = arg;
+    struct bufferevent *other_bev = OTHER_BEV(bev, state);
+
+    if (events & BEV_EVENT_CONNECTED) {
+        LogTrace(state->name, "%s EVENT_CONNECTED", PARTY(bev, state));
+
+        bufferevent_enable(state->proxy_bev, EV_READ|EV_WRITE);
+        bufferevent_enable(state->client_bev, EV_READ|EV_WRITE);
+    } else if (events & BEV_EVENT_EOF) {
+        LogTrace(state->name, "%s EVENT_EOF", PARTY(bev, state));
+
+        if (other_bev) {
+            size_t bytes_remain = evbuffer_get_length(bufferevent_get_input(bev));
+            if (bytes_remain) {
+                LogWarn(state->name, "%d bytes remain after EOF");
+                // flush?
+                // readcb(bev, state);
+            }
+        }
+        cleanup_telex(&state);
+    } else if (events & BEV_EVENT_ERROR) {
+        LogWarn(state->name, "%s EVENT_ERROR", PARTY(bev, state));
+        cleanup_telex(&state);
+    }
 
 }
 
-
-
 void readcb(struct bufferevent *bev, void *arg)
 {
+    struct telex_st *state = arg;
+    struct config *conf = state->conf;
+    struct bufferevent *other_bev = OTHER_BEV(bev, state);
 
+    if (!other_bev) {
+        LogError(state->name, "%s has null partner in read_cb", PARTY(bev, state));
+        cleanup_telex(&state);
+        return;
+    }
+    struct evbuffer *src = bufferevent_get_input(bev);
+    struct evbuffer *dst = bufferevent_get_output(other_bev);
+
+    LogTrace(state->name, "%s readcb %d bytes", PARTY(bev, state), evbuffer_get_length(src));
+
+    evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
 }
 
 
@@ -126,7 +200,6 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
     char content_type = *p++;
     uint16_t version = (*p++ << 8);
     version |= *p++;
-            
     uint16_t ssl_length = (*p++ << 8);
     ssl_length |= *p++;
 
@@ -170,12 +243,7 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     char *master_key;
     unsigned char *server_random, *client_random;
     int i;
-    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
 
-    inet_ntop(AF_INET, &iph->saddr, src_addr, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &iph->daddr, dst_addr, INET_ADDRSTRLEN);
-
-    LogDebug("station", "New Telex flow: %lu : %s:%d -> %s:%d", stego_len, src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
 
     // Unpack master key
     master_key_len = stego_data[7];
@@ -197,6 +265,10 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         return;
     }
 
+    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &iph->saddr, src_addr, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &iph->daddr, dst_addr, INET_ADDRSTRLEN);
+
     // Setup new TCP forge socket
     // Attach SSL to it
     // Send response "HTTP/1.1 299 OK SPTELEX\r\n"
@@ -209,20 +281,28 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         return;
     }
 
+    state->id = conf->num_tunnels++;
+    conf->num_open_tunnels++;
+    snprintf(state->name, sizeof(state->name), "tunnel %lu" , state->id);
+
+    LogDebug(state->name, "Opened: %s:%d -> %s:%d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
+
     state->conf = conf;
     state->ssl = ssl;
     state->client_sock = socket(AF_INET, SOCK_FORGE, 0);
     if (state->client_sock < 0) {
+        LogError(state->name, "forget_socket socket() error");
         perror("(forge_)socket");
+        cleanup_telex(&state);
     }
 
     struct tcp_state *tcp_st = forge_socket_get_default_state();
     tcp_st->src_ip  = iph->daddr;
     tcp_st->dst_ip  = iph->saddr;
-    tcp_st->sport   = th->source;
-    tcp_st->dport   = th->dest;
-    tcp_st->seq     = th->ack;
-    tcp_st->ack     = th->seq + (tcp_len - 4*th->doff);
+    tcp_st->sport   = th->dest;
+    tcp_st->dport   = th->source;
+    tcp_st->seq     = ntohl(th->ack_seq);   // There is no good reason why these are little endian, and the rest are big...
+    tcp_st->ack     = ntohl(th->seq) + (tcp_len - 4*th->doff);
 
     forge_socket_set_state(state->client_sock, tcp_st);
 
@@ -230,15 +310,13 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
 
     evutil_make_socket_nonblocking(state->client_sock);
 
-
     // Setup proxy connection
     state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
     bufferevent_setcb(state->proxy_bev, readcb, NULL, eventcb, state);
-    if (bufferevent_socket_connect(state->proxy_bev, 
+    if (bufferevent_socket_connect(state->proxy_bev,
             (struct sockaddr *)&conf->proxy_addr_sin, sizeof(struct sockaddr_in)) < 0) {
-        LogError("station", "Bufferevent_socket_connect failed for connecting to proxy");
-        bufferevent_free(state->proxy_bev);
-        free(state);
+        LogError(state->name, "Bufferevent_socket_connect failed for connecting to proxy");
+        cleanup_telex(&state);
         return;
     }
 
@@ -246,20 +324,19 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     BIO *bio = BIO_new_socket(state->client_sock, BIO_NOCLOSE);
     SSL_set_bio(state->ssl, bio, bio);
 
-    // Setup client "connection" 
+    // Setup client "connection"
     // TODO: maybe don't use BEV_OPT_CLOSE_ON_FREE, so we can shut it down cleanly
-    state->client_bev = bufferevent_openssl_socket_new(conf->base, 
+    state->client_bev = bufferevent_openssl_socket_new(conf->base,
                                                        state->client_sock,
                                                        state->ssl,
                                                        BUFFEREVENT_SSL_OPEN,
-                                                       BEV_OPT_CLOSE_ON_FREE);
+                                                       0);
     bufferevent_setcb(state->client_bev, readcb, NULL, eventcb, state);
 
     // Write the ACK mesage!
-    evbuffer_add_printf(bufferevent_get_output(state->client_bev), "I GOT CHUUUUUU\r\n\r\n");
+    evbuffer_add_printf(bufferevent_get_output(state->client_bev), "SPTELEX OK");
 
 }
-    
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
 {
@@ -610,7 +687,7 @@ int main(int argc,char **argv)
             exit(-1);
         }
         pfring_set_cluster(conf.ring, conf.pfring_id, cluster_per_flow_5_tuple);
-        pfring_set_application_name(conf.ring, "rexmit");
+        pfring_set_application_name(conf.ring, "station");
         if (pfring_set_socket_mode(conf.ring, recv_only_mode) != 0) {
             LogError("station", "Error: pfring_set_socket_mode");
             exit(-1);
