@@ -114,6 +114,11 @@ void cleanup_telex(struct telex_st **_state)
 
     LogTrace(state->name, "cleanup");
 
+    if (state->rst_event) {
+        event_free(state->rst_event);
+        state->rst_event = NULL;
+    }
+
     if (state->client_bev) {
         bufferevent_free(state->client_bev);
         state->client_bev = NULL;
@@ -133,6 +138,16 @@ void cleanup_telex(struct telex_st **_state)
     LogDebug(state->name, "Closed");
 
     free(state);
+}
+
+void rst_and_close(evutil_socket_t fd, short events, void *arg)
+{
+    struct telex_st *state = arg;
+
+    LogTrace(state->name, "Close and RST timeout");
+
+    send_rst_pkt(state);
+    cleanup_telex(&state);
 }
 
 #define ISCLIENT(bev, state) ((bev) == (state)->client_bev)
@@ -456,6 +471,11 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     // Write the ACK mesage!
     evbuffer_add_printf(bufferevent_get_output(state->client_bev), "SPTELEX OK");
 
+    // Set timeout on connection
+    // TODO: timeout per server that we are impersonating
+    struct timeval rst_tv = {18, 0};
+    state->rst_event = event_new(state->conf->base, -1, 0, rst_and_close, state);
+    event_add(state->rst_event, &rst_tv);
 }
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
