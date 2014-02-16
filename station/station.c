@@ -119,14 +119,19 @@ void cleanup_telex(struct telex_st **_state)
         state->rst_event = NULL;
     }
 
-    if (state->client_bev) {
-        bufferevent_free(state->client_bev);
-        state->client_bev = NULL;
-    }
-
     if (state->proxy_bev) {
         bufferevent_free(state->proxy_bev);
         state->proxy_bev = NULL;
+    }
+
+    if (state->ssl && state->client_bev) {
+        SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
+        SSL_shutdown(state->ssl);
+    }
+
+    if (state->client_bev) {
+        bufferevent_free(state->client_bev);
+        state->client_bev = NULL;
     }
 
     if (state->ssl) {
@@ -202,9 +207,25 @@ void readcb(struct bufferevent *bev, void *arg)
     struct evbuffer *src = bufferevent_get_input(bev);
     struct evbuffer *dst = bufferevent_get_output(other_bev);
 
-    LogTrace(state->name, "%s readcb %d bytes", PARTY(bev, state), evbuffer_get_length(src));
+    LogTrace(state->name, "%s readcb %d bytes -> %d bytes dst (totals: %d client, %d proxy)",
+        PARTY(bev, state), evbuffer_get_length(src), evbuffer_get_length(dst), state->client_read_tot, state->proxy_read_tot);
 
-    evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
+    if (bev == state->client_bev) {
+        state->client_read_tot += evbuffer_get_length(src);
+    } else {
+        state->proxy_read_tot += evbuffer_get_length(src);
+    }
+
+    //evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
+    evbuffer_drain(src, evbuffer_get_length(src));
+    LogTrace(state->name, "ok");
+    if (evbuffer_get_length(src)) {
+        LogWarn(state->name, "Still have %d bytes left in buffer", evbuffer_get_length(src));
+    }
+    LogTrace(state->name, "ok2");
+    if (state->client_read_tot>135168) {
+        LogTrace(state->name, "you about to crash, son");
+    }
 }
 
 
@@ -392,6 +413,8 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         return;
     }
 
+    state->client_read_tot = 0;
+    state->proxy_read_tot = 0;
     state->id = conf->num_tunnels++;
     conf->num_open_tunnels++;
     snprintf(state->name, sizeof(state->name), "tunnel %lu" , state->id);

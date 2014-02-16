@@ -115,6 +115,10 @@ struct telex_st {
 
     struct bufferevent *client_bev;
     struct bufferevent *proxy_bev;
+    struct event *rst_event;
+
+    uint64_t client_read_tot;
+    uint64_t proxy_read_tot;
 };
 
 #endif
