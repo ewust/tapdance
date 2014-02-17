@@ -1,6 +1,10 @@
 #ifndef FLOW_H
 #define FLOW_H
 
+#include "station.h"
+
+struct config;
+
 // Generic type used in a map[(ip,port)] -> flow.value
 // used for both TCP and UDP, though UDP only uses dst_packets and pcap_file.
 // Need to be uniform for cleanup to be able to loop through a single map (could do two maps, but they are very sparse)
@@ -50,6 +54,8 @@ struct flow *add_flow(struct flow_map *conn_map, struct flow *new_flow);
 struct flow *lookup_flow(struct flow_map *conn_map, uint32_t src_ip,
                          uint32_t dst_ip, uint16_t src_port, uint16_t dst_port);
 
+void cleanup_flow(struct flow_key *key, struct flow_key *prev_key, struct config *conf);
 
+int cleanup_expired(struct config *conf);
 
 #endif

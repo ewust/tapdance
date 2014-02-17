@@ -47,4 +47,77 @@ struct flow *lookup_flow(struct flow_map *conn_map, uint32_t src_ip, uint32_t ds
     return NULL;
 }
 
+void cleanup_flow(struct flow_key *key, struct flow_key *prev_key, struct config *conf)
+{
+    struct flow *cur_flow = key->cur;
+    int idx = HASH_IDX(cur_flow->src_ip, cur_flow->dst_ip, cur_flow->src_port, cur_flow->dst_port);
+
+    //printf("cleaning up flow %08x:%04x:%04x\n", key->cur->ip, key->cur->port, key->cur->txid);
+
+    // Find previous element in hashtable
+    struct flow *prev_bucket = NULL;
+    struct flow *cur_bucket = conf->conn_map.map[idx];
+    assert(cur_bucket != NULL);
+    while (cur_bucket != NULL && cur_bucket != cur_flow) {
+        prev_bucket = cur_bucket;
+        cur_bucket = cur_bucket->next;
+    }
+    assert(cur_bucket == cur_flow);
+
+    // Fixup map linked list
+    if (prev_bucket != NULL) {
+        prev_bucket->next = cur_flow->next;
+    } else {
+        // First element in list
+        conf->conn_map.map[idx] = cur_flow->next;
+    }
+
+    // Remove from keys list
+    if (prev_key != NULL) {
+        prev_key->next = key->next;
+    } else {
+        // First key in list, set head of list
+        conf->conn_map.keys = key->next;
+    }
+
+    // Free key entry
+    free(key);
+
+    // Free self
+    free(cur_flow);
+
+    conf->stats.cur_flows--;
+}
+
+int cleanup_expired(struct config *conf)
+{
+    struct flow_key *cur_key = conf->conn_map.keys;
+    struct timeval cur_ts;
+    struct flow_key *prev_key = NULL;
+    int num_removed = 0;
+
+    // TODO: use packet time or is real time good enough?
+    // possible easy fix: pad TCP_EXPIRE_SEC with the max processing delay we expect
+    gettimeofday(&cur_ts, NULL);
+
+    while (cur_key != NULL) {
+        assert(cur_key->cur != NULL);
+        if (cur_key->cur->expire.tv_sec < cur_ts.tv_sec ||
+            (cur_key->cur->expire.tv_sec == cur_ts.tv_sec &&
+            cur_key->cur->expire.tv_usec <= cur_ts.tv_usec)) {
+            // Expired
+            struct flow_key *tmp_key = cur_key->next;   // because cleanup_flow will free(cur_key)
+            cleanup_flow(cur_key, prev_key, conf);
+            cur_key = tmp_key;  // Don't update prev_key
+
+            num_removed++;
+        } else {
+            prev_key = cur_key;
+            cur_key = cur_key->next;
+        }
+    }
+
+    return num_removed;
+}
+
 
