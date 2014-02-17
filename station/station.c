@@ -5,24 +5,14 @@
 #include "tcp.h"
 #include "proxy_map.h"
 
-void cleanup_telex(struct telex_st **_state)
-{
-    if (!_state) {
-        return;
-    }
-    struct telex_st *state = *_state;
-    *_state = NULL;
+void client_readcb(struct bufferevent *bev, void *arg);
 
-    LogTrace(state->name, "cleanup");
+void cleanup_ssl(struct telex_st *state)
+{
 
     if (state->rst_event) {
         event_free(state->rst_event);
         state->rst_event = NULL;
-    }
-
-    if (state->proxy_bev) {
-        bufferevent_free(state->proxy_bev);
-        state->proxy_bev = NULL;
     }
 
     if (state->ssl && state->client_bev && state->client_sock) {
@@ -43,9 +33,30 @@ void cleanup_telex(struct telex_st **_state)
 
     if (state->client_sock) {
         // should be done by client_bev free?
-        //close(state->client_sock);
+        close(state->client_sock);
         state->client_sock = 0;
     }
+
+
+
+}
+
+void cleanup_telex(struct telex_st **_state)
+{
+    if (!_state) {
+        return;
+    }
+    struct telex_st *state = *_state;
+    *_state = NULL;
+
+    LogTrace(state->name, "cleanup");
+
+    if (state->proxy_bev) {
+        bufferevent_free(state->proxy_bev);
+        state->proxy_bev = NULL;
+    }
+
+    cleanup_ssl(state);
 
     if (state->proxy_entry) {
         remove_conn_id(state);
@@ -57,21 +68,10 @@ void cleanup_telex(struct telex_st **_state)
     free(state);
 }
 
-void rst_and_close(evutil_socket_t fd, short events, void *arg)
-{
-    struct telex_st *state = arg;
-
-    LogTrace(state->name, "Close and RST timeout");
-
-    tcp_send_rst_pkt(state);
-    cleanup_telex(&state);
-}
-
 enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
 
-void send_close_msg(struct telex_st *state)
+void send_close_msg(struct telex_st *state, uint8_t msg_type)
 {
-    uint8_t msg_type = MSG_CLOSE;
     LogTrace(state->name, "Sending close message");
     evbuffer_add(bufferevent_get_output(state->client_bev), &msg_type, sizeof(msg_type));
 
@@ -85,6 +85,25 @@ void send_close_msg(struct telex_st *state)
     SSL_free(state->ssl);
     state->ssl = NULL;
 }
+
+// This now does a RST to the server, and closes the
+// client connection with a MSG_RECONNECT
+void rst_and_close(evutil_socket_t fd, short events, void *arg)
+{
+    struct telex_st *state = arg;
+
+    LogTrace(state->name, "Close and RST timeout");
+
+    send_close_msg(state, MSG_RECONNECT);
+
+    tcp_send_rst_pkt(state);
+
+    cleanup_ssl(state);
+
+    // TODO: Setup a cleanup timeout
+    //cleanup_telex(&state);
+}
+
 
 
 
@@ -108,7 +127,23 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
     } else if (events & BEV_EVENT_EOF) {
         LogTrace(state->name, "%s EVENT_EOF", PARTY(bev, state));
 
+        if (ISCLIENT(bev, state)) {
+            // maybe they are done, maybe they'll reopen...
+            size_t bytes_remain = evbuffer_get_length(bufferevent_get_input(bev));
+            if (bytes_remain) {
+                LogTrace(state->name, "%d bytes remain", bytes_remain);
+                client_readcb(bev, state);
+            }
+            bufferevent_disable(state->proxy_bev, EV_READ);
+            tcp_send_rst_pkt(state);    // make sure this one closes...
+            cleanup_ssl(state);
+            return;
+        }
+
         if (other_bev) {
+            LogTrace(state->name, "other bev, going to flush...+%d to write", evbuffer_get_length(bufferevent_get_output(other_bev)));
+
+            bufferevent_flush(other_bev, EV_WRITE, BEV_FINISHED);
             size_t bytes_remain = evbuffer_get_length(bufferevent_get_input(bev));
             if (bytes_remain) {
                 LogWarn(state->name, "%d bytes remain after EOF");
@@ -118,7 +153,7 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
         }
         if (ISPROXY(bev, state) && state->client_bev) {
             // tell client of close so they don't try to reconnect to this tunnel
-            send_close_msg(state);
+            send_close_msg(state, MSG_CLOSE);
             bufferevent_disable(state->proxy_bev, EV_READ);
         }
         tcp_send_rst_pkt(state);
@@ -126,7 +161,7 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
     } else if (events & BEV_EVENT_ERROR) {
         LogWarn(state->name, "%s EVENT_ERROR", PARTY(bev, state));
         if (ISPROXY(bev, state) && state->client_bev) {
-            send_close_msg(state);
+            send_close_msg(state, MSG_CLOSE);
             tcp_send_rst_pkt(state);
             cleanup_telex(&state);
             return;
@@ -134,8 +169,15 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
             // Give the client a small amount of time to create a new connection
             // to continue this one
             // TODO: set timeout
+            // clear buffer 
+            size_t bytes_remain = evbuffer_get_length(bufferevent_get_input(bev));
+            if (bytes_remain) {
+                LogTrace(state->name, "%d bytes remain", bytes_remain);
+                client_readcb(bev, state);
+            }
             bufferevent_disable(state->proxy_bev, EV_READ);
             tcp_send_rst_pkt(state);    // make sure this one closes...
+            cleanup_ssl(state);
         }
     }
 }
@@ -158,8 +200,10 @@ void proxy_readcb(struct bufferevent *bev, void *arg)
         buffer_len, evbuffer_get_length(dst), state->client_read_tot, state->proxy_read_tot);
 
     while (buffer_len) {
-        msg_len = buffer_len & 0xffff;
+        msg_len = buffer_len;
+        if (buffer_len > 0xffff) msg_len = 0xffff;
         uint16_t msg_len_n = htons(msg_len);
+        LogTrace(state->name, "writing %02x%04x + %d bytes of data to client", msg_type, msg_len_n, msg_len);
         evbuffer_add(dst, &msg_type, sizeof(msg_type));
         evbuffer_add(dst, &msg_len_n, sizeof(msg_len_n));
         evbuffer_remove_buffer(src, dst, msg_len);
@@ -323,6 +367,7 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     unsigned char *server_random, *client_random;
     char *conn_id;
     int i;
+    int conn_reuse = 0;
 
 
     // Unpack master key
@@ -375,6 +420,9 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
 
         HexDump(LOG_TRACE, state->name, "Created, conn_id: ", conn_id, 16);
 
+        memcpy(state->proxy_id, conn_id, sizeof(state->proxy_id));
+        insert_conn_id(state);
+
         // Setup new proxy connection
         state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
         bufferevent_setcb(state->proxy_bev, proxy_readcb, NULL, eventcb, state);
@@ -385,6 +433,7 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
             return;
         }
     } else {
+        conn_reuse = 1; // so we enable the proxy read cb
         LogTrace(state->name, "welcome back");
     }
 
@@ -439,6 +488,9 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
 
     // Client is now connected to us, we can resume the tunnel
     bufferevent_enable(state->proxy_bev, EV_READ|EV_WRITE);
+    if (conn_reuse) {
+        bufferevent_enable(state->client_bev, EV_READ|EV_WRITE);
+    }
 }
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
