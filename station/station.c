@@ -28,7 +28,7 @@ void cleanup_telex(struct telex_st **_state)
     if (state->ssl && state->client_bev && state->client_sock) {
         SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
         SSL_shutdown(state->ssl);
-        close(state->client_sock);
+        //close(state->client_sock);
     }
 
     if (state->client_bev) {
@@ -67,6 +67,27 @@ void rst_and_close(evutil_socket_t fd, short events, void *arg)
     cleanup_telex(&state);
 }
 
+enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
+
+void send_close_msg(struct telex_st *state)
+{
+    uint8_t msg_type = MSG_CLOSE;
+    LogTrace(state->name, "Sending close message");
+    evbuffer_add(bufferevent_get_output(state->client_bev), &msg_type, sizeof(msg_type));
+
+    SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
+    SSL_shutdown(state->ssl);
+    //close(state->client_sock);
+
+    // Free stuff now? Or have a callback? When does this stuff get sent out?
+    bufferevent_free(state->client_bev);
+    state->client_bev = NULL;
+    SSL_free(state->ssl);
+    state->ssl = NULL;
+}
+
+
+
 #define ISCLIENT(bev, state) ((bev) == (state)->client_bev)
 #define ISPROXY(bev, state) ((bev) == (state)->proxy_bev)
 #define PARTY(bev, state) (ISCLIENT((bev),(state)) ? "client" : \
@@ -95,26 +116,30 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
                 // readcb(bev, state);
             }
         }
+        if (ISPROXY(bev, state) && state->client_bev) {
+            // tell client of close so they don't try to reconnect to this tunnel
+            send_close_msg(state);
+            bufferevent_disable(state->proxy_bev, EV_READ);
+        }
         tcp_send_rst_pkt(state);
         cleanup_telex(&state);
     } else if (events & BEV_EVENT_ERROR) {
         LogWarn(state->name, "%s EVENT_ERROR", PARTY(bev, state));
-        if (ISCLIENT(bev, state)) {
-            // Give the client a small amount of time to create a new connection
-            // to continue this one
-            tcp_send_rst_pkt(state);    // make sure this one closes...
-            // TODO: set timeout
-        } else {
-            // Tear down both connections
-            //close_telex_conn(state);
+        if (ISPROXY(bev, state) && state->client_bev) {
+            send_close_msg(state);
             tcp_send_rst_pkt(state);
             cleanup_telex(&state);
+            return;
+        } else if (state->proxy_bev) {
+            // Give the client a small amount of time to create a new connection
+            // to continue this one
+            // TODO: set timeout
+            bufferevent_disable(state->proxy_bev, EV_READ);
+            tcp_send_rst_pkt(state);    // make sure this one closes...
         }
     }
-
 }
 
-enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
 // Here we read from the proxy, and package it into a MSG_DATA header
 // to the client
 void proxy_readcb(struct bufferevent *bev, void *arg)
@@ -359,6 +384,8 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
             cleanup_telex(&state);
             return;
         }
+    } else {
+        LogTrace(state->name, "welcome back");
     }
 
     LogDebug(state->name, "opened %s:%d -> %s:%d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
@@ -409,6 +436,9 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     struct timeval rst_tv = {18, 0};
     state->rst_event = event_new(state->conf->base, -1, 0, rst_and_close, state);
     event_add(state->rst_event, &rst_tv);
+
+    // Client is now connected to us, we can resume the tunnel
+    bufferevent_enable(state->proxy_bev, EV_READ|EV_WRITE);
 }
 
 void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packet)
