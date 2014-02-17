@@ -34,6 +34,7 @@
 
 void first_read_cb(struct bufferevent *bev, struct telex_state *state);
 static void read_cb(struct bufferevent *, struct telex_state *);
+void remote_read_cb(struct bufferevent *bev, struct telex_state *state);
 static void event_cb(struct bufferevent *, short, struct telex_state *);
 static void drained_write_cb(struct bufferevent *, struct telex_state *);
 static void close_on_finished_write_cb(struct bufferevent *, struct telex_state *);
@@ -96,22 +97,10 @@ struct telex_state *StateInit(struct telex_conf *conf)
 	return state;
 }
 
-// Deallocate dynamic structures, close socket,
-// and free State object itself.
-// Please add cleanup code here if you extend
-// the structure!
-void StateCleanup(struct telex_state **_state)
+// Only cleans up the remote connection and SSL objects (the good parts)
+// leaving the local proxy intact
+void cleanup_ssl(struct telex_state *state)
 {
-	if (!_state || !_state)
-		return;	
-	struct telex_state *state = *_state;
-	*_state = NULL;
-
-	if (state->local) {
-		_dec(BEV, state->local);
-		bufferevent_free(state->local);
-		state->local = NULL;
-	}
 	if (state->remote) {
 		_dec(BEV, state->remote);
 		bufferevent_free(state->remote);
@@ -127,6 +116,25 @@ void StateCleanup(struct telex_state **_state)
 		SSL_free(state->ssl);
 		state->ssl = NULL;
 	}
+}
+
+// Deallocate dynamic structures, close socket,
+// and free State object itself.
+// Please add cleanup code here if you extend
+// the structure!
+void StateCleanup(struct telex_state **_state)
+{
+	if (!_state || !_state)
+		return;
+	struct telex_state *state = *_state;
+	*_state = NULL;
+
+	if (state->local) {
+		_dec(BEV, state->local);
+		bufferevent_free(state->local);
+		state->local = NULL;
+	}
+    cleanup_ssl(state);
 
 	// TODO: Do we have to close the sockets?	
 
@@ -202,14 +210,17 @@ void make_new_telex_conn(struct telex_state *state)
 	}
 	_inc(BEV);
 
-    // First, set our read_cb to something that receives the "SPTELEX OK" message
+    // First, set our read_cb to something that receives the SPTelex init message
 	bufferevent_setcb(state->remote, (bufferevent_data_cb)first_read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
 
-    // Disable until "SPTELEX OK"
+    // Disable until SPTelex init msg
     bufferevent_disable(state->local, EV_READ|EV_WRITE);
 	bufferevent_setcb(state->local, (bufferevent_data_cb)read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
+
+    // Hmm...we should make a second one of these
+    state->in_local = 0;
 }
 
 // We've accepted a connection for proxying...
@@ -267,40 +278,46 @@ void proxy_accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 #define PARTY(bev, state) (ISLOCAL((bev),(state)) ? "local" : \
 	(ISREMOTE((bev),(state)) ? "remote" : "other" ))
 
-#define TELEX_OK_MSG "SPTELEX OK"
+// TODO: common.h
+struct init_msg_st {
+    uint8_t type;
+    uint16_t len;
+    uint16_t magic_val; // Prevent accidental init
+    uint16_t win_size;
+} __attribute__((packed));
+#define SPTELEX_MAGIC_VAL 0x2a75
+enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
 
 void first_read_cb(struct bufferevent *bev, struct telex_state *state)
 {
     struct evbuffer *src = bufferevent_get_input(bev);
-    char ok_msg[strlen(TELEX_OK_MSG)+1];
-    if (evbuffer_get_length(src) < strlen(TELEX_OK_MSG)) {
+    struct init_msg_st msg;
+    if (evbuffer_get_length(src) < sizeof(msg)) {
         return;
     }
 
     LogTrace(state->name, "first_read %d bytes", evbuffer_get_length(src));
 
-    evbuffer_remove(src, ok_msg, sizeof(ok_msg)-1);
-    ok_msg[strlen(TELEX_OK_MSG)] = '\0';
+    evbuffer_remove(src, &msg, sizeof(msg));
 
-    if (strcmp(ok_msg, TELEX_OK_MSG)) {
+    if (msg.type != MSG_INIT || msg.magic_val != SPTELEX_MAGIC_VAL) {
         // Not Telex, end this connection
-        LogWarn(state->name, "Failed to get a SPTELEX OK message (not using a Telex server, or it's not running?) Got: %s", ok_msg);
-        //cleanup
+        LogWarn(state->name, "Failed to get a SPTelex init msg (not using a Telex server, or it's not running?) Got: %04x", msg.magic_val);
         StateCleanup(&state);
         return;
     }
 
-    LogTrace(state->name, "Got SPTELEX");
+    LogTrace(state->name, "Got SPTelex init");
+    state->max_send = msg.win_size;
 
     // Set up to start passing between proxy and client
-	bufferevent_setcb(state->remote, (bufferevent_data_cb)read_cb, NULL,
+	bufferevent_setcb(state->remote, (bufferevent_data_cb)remote_read_cb, NULL,
 		(bufferevent_event_cb)event_cb, state);
 
     // Allow local proxy to start sending data
 	bufferevent_enable(state->local,  EV_READ|EV_WRITE);
 }
 
-enum { MSG_DATA=0, MSG_RECONNECT, MSG_CLOSE };
 // Parse header
 //      uint8_t     msg_type;
 //      uint16_t    msg_len;
@@ -345,11 +362,14 @@ void remote_read_cb(struct bufferevent *bev, struct telex_state *state)
         LogTrace(state->name, "READCB remote: MSG_RECONNECT");
         state->retry_conn = 1;
         bufferevent_disable(state->local, EV_READ);
+        cleanup_ssl(state);
+        make_new_telex_conn(state);
         return;
 
     case MSG_CLOSE:
         LogTrace(state->name, "READCB remote: MSG_CLOSE");
         state->retry_conn = 0;
+        StateCleanup(&state);
         return;
 
     default:
@@ -368,8 +388,16 @@ void read_cb(struct bufferevent *bev, struct telex_state *state)
 	size_t len = evbuffer_get_length(src);
 	size_t total = 0;
 	if (ISLOCAL(bev,state)) {
+        if ((state->in_local + len) > state->max_send) {
+            LogDebug(state->name, "about to exceed send window; starting new connection");
+            cleanup_ssl(state);
+            make_new_telex_conn(state);
+            return;
+        }
+
 		total = (state->in_local += len);
 	} else if (ISREMOTE(bev,state)) {
+        LogError(state->name, "you shouldn't be here");
 		total = (state->in_remote += len);
 	} else {
 		assert(0);
@@ -578,6 +606,7 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 		LogTrace(state->name, "SSL state: %s", SSL_state_string_long(state->ssl));
 
         encode_master_key_in_req(state);
+        bufferevent_enable(state->local, EV_READ|EV_WRITE);
 		bufferevent_enable(state->remote, EV_READ|EV_WRITE);
 		return;
 
@@ -588,6 +617,7 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 			if (evbuffer_get_length(bufferevent_get_input(bev))) {
 				read_cb(bev, state);
 			}
+
 			if (evbuffer_get_length(bufferevent_get_output(partner))) {
 				// output still pending
 				bufferevent_setcb(partner, NULL,
