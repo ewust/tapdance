@@ -173,7 +173,17 @@ void make_new_telex_conn(struct telex_state *state)
 {
     struct telex_conf *conf = state->conf;
 
-    HexDump(LOG_TRACE, state->name, "Opening telex id ", state->remote_conn_id, sizeof(state->remote_conn_id));
+    HexDump(LOG_TRACE, state->name, "Opening telex id:", state->remote_conn_id, sizeof(state->remote_conn_id));
+
+	state->remotetcp = bufferevent_socket_new(state->base, -1,
+		BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
+	if (!state->remotetcp) {
+		LogError(state->name, "Could not create remote bufferevent socket");
+		StateCleanup(&state);
+		return;
+	}
+	_inc(BEV);
+
     // TODO: make nonblocking lookup?
     bufferevent_socket_connect_hostname(state->remotetcp, NULL, AF_INET, conf->notblocked_host, conf->notblocked_port);
 
@@ -245,15 +255,6 @@ void proxy_accept_cb(struct evconnlistener *listener, evutil_socket_t fd,
 	}
 	_inc(BEV);
 
-	state->remotetcp = bufferevent_socket_new(state->base, -1,
-		BEV_OPT_CLOSE_ON_FREE|BEV_OPT_DEFER_CALLBACKS);
-	if (!state->remotetcp) {
-		LogError(state->name, "Could not create remote bufferevent socket");
-		StateCleanup(&state);
-		return;
-	}
-	_inc(BEV);
-
     make_new_telex_conn(state);
 }
 
@@ -300,15 +301,15 @@ void first_read_cb(struct bufferevent *bev, struct telex_state *state)
 
     evbuffer_remove(src, &msg, sizeof(msg));
 
-    if (msg.type != MSG_INIT || msg.magic_val != SPTELEX_MAGIC_VAL) {
+    if (msg.type != MSG_INIT || ntohs(msg.magic_val) != SPTELEX_MAGIC_VAL) {
         // Not Telex, end this connection
         LogWarn(state->name, "Failed to get a SPTelex init msg (not using a Telex server, or it's not running?) Got: %04x", msg.magic_val);
         StateCleanup(&state);
         return;
     }
 
-    LogTrace(state->name, "Got SPTelex init");
-    state->max_send = msg.win_size;
+    state->max_send = ntohs(msg.win_size);
+    LogTrace(state->name, "Got SPTelex init, window: %d", state->max_send);
 
     // Set up to start passing between proxy and client
 	bufferevent_setcb(state->remote, (bufferevent_data_cb)remote_read_cb, NULL,
@@ -318,6 +319,10 @@ void first_read_cb(struct bufferevent *bev, struct telex_state *state)
 	bufferevent_enable(state->local,  EV_READ|EV_WRITE);
 }
 
+struct msg_hdr {
+    uint8_t msg_type;
+    uint16_t msg_len;
+} __attribute__((packed));
 // Parse header
 //      uint8_t     msg_type;
 //      uint16_t    msg_len;
@@ -328,6 +333,7 @@ void remote_read_cb(struct bufferevent *bev, struct telex_state *state)
     struct evbuffer *src = bufferevent_get_input(bev);
     uint8_t msg_type;
     uint16_t msg_len;
+    struct msg_hdr msg;
     size_t buffer_len = evbuffer_get_length(src);
 
     if (buffer_len < sizeof(msg_type)) {
@@ -339,21 +345,21 @@ void remote_read_cb(struct bufferevent *bev, struct telex_state *state)
     switch (msg_type) {
     case MSG_DATA:
         // Read message length from header
-        if ((buffer_len - sizeof(msg_type)) < sizeof(msg_len)) {
+        if (buffer_len < sizeof(msg)) {
             return;
         }
-        evbuffer_copyout(src, &msg_len, sizeof(msg_len));
-        msg_len = ntohs(msg_len);
-        if ((buffer_len - sizeof(msg_type) - sizeof(msg_len)) < msg_len) {
+        evbuffer_copyout(src, &msg, sizeof(msg));
+        msg_len = ntohs(msg.msg_len);
+        if ((buffer_len - sizeof(msg)) < msg_len) {
             return;
         }
         // Eat header
-        evbuffer_drain(src, sizeof(msg_type) + sizeof(msg_len));
+        evbuffer_drain(src, sizeof(msg));
 
         // Book keeping
 		state->in_remote += msg_len;
-        LogTrace(state->name, "READCB remote: MSG_DATA (got %lu bytes / %lu bytes so far)",
-                msg_len, state->in_remote);
+        LogTrace(state->name, "READCB remote: MSG_DATA buflen: %d (got %lu bytes / %lu bytes so far)",
+                buffer_len, msg_len, state->in_remote);
 
         evbuffer_remove_buffer(src, bufferevent_get_output(state->local), msg_len);
         return;
@@ -379,6 +385,50 @@ void remote_read_cb(struct bufferevent *bev, struct telex_state *state)
 
 }
 
+// This is for when our local connection EOFs or ERRORs,
+// and we want to do a (flushed) shutdown of the Telex connection
+// Otherwise, calling StateCleanup too early will free/close
+// things before pending data can be flushed
+void tcpdone_final(__attribute__((unused)) struct bufferevent *bev,
+                   __attribute__((unused)) short events, void *arg)
+{
+    struct telex_state *state = arg;
+    StateCleanup(&state);
+}
+
+// This is called when we are closing the telex connection
+// and the underlying TCP connection has closed
+// We can then safely open a new telex connection in its place
+// (with the same conn_id) and resume forwarding data
+void tcpdone(__attribute__((unused)) struct bufferevent *bev,
+             __attribute__((unused)) short events, void *arg)
+{
+    struct telex_state *state = arg;
+    LogTrace(state->name, "i got your close event right here");
+
+    cleanup_ssl(state);
+    make_new_telex_conn(state);
+}
+
+// Call this if you'd like to flush the rest of the data in the remote pipe,
+// and set a callback for when it's closed to start a new connection in its place.
+void close_ssl(struct telex_state *state)
+{
+
+    SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
+    SSL_shutdown(state->ssl);
+    bufferevent_flush(state->remote, EV_WRITE, BEV_FINISHED);
+    bufferevent_flush(state->remotetcp, EV_WRITE, BEV_FINISHED);
+
+    bufferevent_setcb(state->remotetcp, NULL, NULL, tcpdone, state);
+
+    LogDebug(state->name, "%d to read, %d to write", evbuffer_get_length(bufferevent_get_input(state->local)),
+            evbuffer_get_length(bufferevent_get_output(state->remote)));
+    //cleanup_ssl(state);
+    //make_new_telex_conn(state);
+
+}
+
 void read_cb(struct bufferevent *bev, struct telex_state *state)
 {
 	struct bufferevent *partner =
@@ -389,9 +439,15 @@ void read_cb(struct bufferevent *bev, struct telex_state *state)
 	size_t total = 0;
 	if (ISLOCAL(bev,state)) {
         if ((state->in_local + len) > state->max_send) {
-            LogDebug(state->name, "about to exceed send window; starting new connection");
-            cleanup_ssl(state);
-            make_new_telex_conn(state);
+            LogDebug(state->name, "about to exceed send window (%d + %d > %d); starting new connection, with %d bytes left to send",
+                                state->in_local, len, state->max_send,
+                                evbuffer_get_length(bufferevent_get_output(partner)));
+
+            // I think we want to send a close event, but wait for it to go through...?
+            close_ssl(state);
+            bufferevent_disable(state->local, EV_READ);
+            //cleanup_ssl(state);
+            //make_new_telex_conn(state);
             return;
         }
 
@@ -606,12 +662,15 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 		LogTrace(state->name, "SSL state: %s", SSL_state_string_long(state->ssl));
 
         encode_master_key_in_req(state);
-        bufferevent_enable(state->local, EV_READ|EV_WRITE);
 		bufferevent_enable(state->remote, EV_READ|EV_WRITE);
 		return;
 
 	} else if (events & BEV_EVENT_EOF) {
-		LogTrace(state->name, "EVENT_EOF %s", PARTY(bev,state));
+		LogTrace(state->name, "EVENT_EOF %s %d bytes pending, %d bytes write pending", \
+                PARTY(bev,state), evbuffer_get_length(bufferevent_get_input(bev)), evbuffer_get_length(bufferevent_get_output(partner)));
+        bufferevent_flush(state->remote, EV_WRITE, BEV_FINISHED);
+        bufferevent_flush(state->remotetcp, EV_WRITE, BEV_FINISHED);
+        bufferevent_setcb(state->remotetcp, NULL, NULL, tcpdone_final, state);
 		if (partner) {
 			// flush pending data
 			if (evbuffer_get_length(bufferevent_get_input(bev))) {
@@ -627,7 +686,6 @@ void event_cb(struct bufferevent *bev, short events, struct telex_state *state)
 				return;
 			}
 		}
-		StateCleanup(&state);
 		return;
 
 	} else if (events & BEV_EVENT_ERROR) {
