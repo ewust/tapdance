@@ -124,9 +124,10 @@ void cleanup_telex(struct telex_st **_state)
         state->proxy_bev = NULL;
     }
 
-    if (state->ssl && state->client_bev) {
+    if (state->ssl && state->client_bev && state->client_sock) {
         SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
         SSL_shutdown(state->ssl);
+        close(state->client_sock);
     }
 
     if (state->client_bev) {
@@ -137,6 +138,12 @@ void cleanup_telex(struct telex_st **_state)
     if (state->ssl) {
         SSL_free(state->ssl);
         state->ssl = NULL;
+    }
+
+    if (state->client_sock) {
+        // should be done by client_bev free?
+        //close(state->client_sock);
+        state->client_sock = 0;
     }
 
     state->conf->num_open_tunnels--;
@@ -187,44 +194,82 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
         cleanup_telex(&state);
     } else if (events & BEV_EVENT_ERROR) {
         LogWarn(state->name, "%s EVENT_ERROR", PARTY(bev, state));
-        send_rst_pkt(state);
-        cleanup_telex(&state);
+        if (ISCLIENT(bev, state)) {
+            // Give the client a small amount of time to create a new connection
+            // to continue this one
+            send_rst_pkt(state);    // make sure this one closes...
+        } else {
+            // Tear down both connections
+            //close_telex_conn(state);
+            send_rst_pkt(state);
+            cleanup_telex(&state);
+        }
     }
 
 }
 
-void readcb(struct bufferevent *bev, void *arg)
+enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
+// Here we read from the proxy, and package it into a MSG_DATA header
+// to the client
+void proxy_readcb(struct bufferevent *bev, void *arg)
 {
     struct telex_st *state = arg;
     struct config *conf = state->conf;
-    struct bufferevent *other_bev = OTHER_BEV(bev, state);
 
-    if (!other_bev) {
-        LogError(state->name, "%s has null partner in read_cb", PARTY(bev, state));
+    struct evbuffer *src = bufferevent_get_input(bev);
+    struct evbuffer *dst = bufferevent_get_output(state->client_bev);
+    size_t buffer_len = evbuffer_get_length(src);
+    uint16_t msg_len;
+    uint8_t msg_type = MSG_DATA;
+
+    state->proxy_read_tot += buffer_len;
+    LogTrace(state->name, "proxy readcb %d bytes -> %d bytes dst (totals: %d client, %d proxy)",
+        buffer_len, evbuffer_get_length(dst), state->client_read_tot, state->proxy_read_tot);
+
+    while (buffer_len) {
+        msg_len = buffer_len & 0xffff;
+        uint16_t msg_len_n = htons(msg_len);
+        evbuffer_add(dst, &msg_type, sizeof(msg_type));
+        evbuffer_add(dst, &msg_len_n, sizeof(msg_len_n));
+        evbuffer_remove_buffer(src, dst, msg_len);
+
+        buffer_len -= msg_len;
+    }
+}
+
+// For now, the client's data should be directed into the proxy pipe.
+// This isn't really saving us much; the bulk of data goes the other way
+// and has to be encoded in proxy_readcb.
+void client_readcb(struct bufferevent *bev, void *arg)
+{
+    struct telex_st *state = arg;
+    struct config *conf = state->conf;
+
+    if (!state->proxy_bev) {
+        // Note: this could be because we are waiting for the client to
+        // reconnect to this connection; but we should not have gotten
+        // this callback because we should have bufferevent_disable'd it
+        LogError(state->name, "client has null partner in read_cb");
         cleanup_telex(&state);
         return;
     }
     struct evbuffer *src = bufferevent_get_input(bev);
-    struct evbuffer *dst = bufferevent_get_output(other_bev);
+    struct evbuffer *dst = bufferevent_get_output(state->proxy_bev);
 
-    LogTrace(state->name, "%s readcb %d bytes -> %d bytes dst (totals: %d client, %d proxy)",
-        PARTY(bev, state), evbuffer_get_length(src), evbuffer_get_length(dst), state->client_read_tot, state->proxy_read_tot);
+    state->client_read_tot += evbuffer_get_length(src);
+    LogTrace(state->name, "client readcb %d bytes -> %d bytes dst (totals: %d client, %d proxy)",
+        evbuffer_get_length(src), evbuffer_get_length(dst), state->client_read_tot, state->proxy_read_tot);
 
-    if (bev == state->client_bev) {
-        state->client_read_tot += evbuffer_get_length(src);
-    } else {
-        state->proxy_read_tot += evbuffer_get_length(src);
-    }
+    evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
 
-    //evbuffer_remove_buffer(src, dst, evbuffer_get_length(src));
-    evbuffer_drain(src, evbuffer_get_length(src));
-    LogTrace(state->name, "ok");
     if (evbuffer_get_length(src)) {
         LogWarn(state->name, "Still have %d bytes left in buffer", evbuffer_get_length(src));
     }
-    LogTrace(state->name, "ok2");
-    if (state->client_read_tot>135168) {
-        LogTrace(state->name, "you about to crash, son");
+
+    if (state->client_read_tot > state->client_read_limit) {
+        // need to send client MSG_RECONNECT
+        // but really, the client should know this...?
+        LogWarn(state->name, "client should have reconnected by now");
     }
 }
 
@@ -369,60 +414,70 @@ int get_tcp_ts_val(struct tcphdr *th, uint32_t *ts_val, uint32_t *ts_ecr)
     return 0;
 }
 
-void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
-                     char *tcp_data, char *stego_data, size_t stego_len)
+struct init_msg_st {
+    uint8_t type;
+    uint16_t len;
+    uint16_t magic_val; // Prevent accidental init (do we need this?)
+    uint16_t win_size;
+} __attribute__((packed));
+#define SPTELEX_MAGIC_VAL 0x2a75
+
+void send_init_msg(struct telex_st *state)
 {
-    size_t master_key_len;
-    char *master_key;
-    unsigned char *server_random, *client_random;
-    int i;
+    struct init_msg_st msg;
+    msg.type = MSG_INIT;
+    msg.len = htons(sizeof(msg) - 3);
+    msg.magic_val = htons(SPTELEX_MAGIC_VAL);
+    // TODO: lookup
+    msg.win_size = htons(16384);
+    evbuffer_add(bufferevent_get_output(state->client_bev), &msg, sizeof(msg));
+}
 
+struct telex_st *lookup_conn_id(struct config *conf, char *conn_id)
+{
+    int idx = PROXY_HASH_IDX(conn_id);
+    struct proxy_map_entry *entry = conf->proxy_map[idx];
 
-    // Unpack master key
-    master_key_len = stego_data[7];
-    if (master_key_len > stego_len - 8) {
-        master_key_len = stego_len - 8;
+    while (entry) {
+        if (memcmp(entry->state->proxy_id, conn_id,
+                   sizeof(entry->state->proxy_id))==0) {
+            return entry->state;
+        }
+        entry = entry->next;
     }
-    master_key = &stego_data[8];
+    return NULL;
+}
 
-    // Unpack client/server randoms
-    server_random = (unsigned char*)&stego_data[8+master_key_len];
-    client_random = (unsigned char*)&stego_data[8+master_key_len+32];
+// Assumes it is not already in the map
+void insert_conn_id(struct telex_st *state)
+{
+    struct config *conf = state->conf;
+    int idx = PROXY_HASH_IDX(state->proxy_id);
+    struct proxy_map_entry *new_entry;
 
-    SSL *ssl;
-    ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e), server_random, client_random);
+    struct proxy_map_entry *entry = conf->proxy_map[idx];
 
-    char *req_plaintext;
-    if (ssl_decrypt(ssl, tcp_data, tcp_len - 4*th->doff, &req_plaintext) < 0) {
+    new_entry = malloc(sizeof(struct proxy_map_entry));
+    if (!new_entry) {
+        LogError(state->name, "can't malloc new_entry for proxy map");
+        return;
+    }
+    new_entry->state = state;
+    new_entry->next = NULL;
+
+    if (!entry) {
+        conf->proxy_map[idx] = new_entry;
         return;
     }
 
-    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &iph->saddr, src_addr, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, &iph->daddr, dst_addr, INET_ADDRSTRLEN);
-
-    // Setup new TCP forge socket
-    // Attach SSL to it
-    // Send response "HTTP/1.1 299 OK SPTELEX\r\n"
-    // create new connection to socks/http proxy
-    // Setup bufferevents for both proxy and forge_socket/TLS and forward between
-    struct telex_st *state;
-    state = malloc(sizeof(struct telex_st));
-    if (state == NULL) {
-        LogError("station", "Error: out of memory\n");
-        return;
+    while (entry->next != NULL) {
+        entry = entry->next;
     }
+    entry->next = new_entry;
+}
 
-    state->client_read_tot = 0;
-    state->proxy_read_tot = 0;
-    state->id = conf->num_tunnels++;
-    conf->num_open_tunnels++;
-    snprintf(state->name, sizeof(state->name), "tunnel %lu" , state->id);
-
-    LogDebug(state->name, "Opened: %s:%d -> %s:%d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
-
-    state->conf = conf;
-    state->ssl = ssl;
+void init_forge_socket_conn(struct telex_st *state, struct iphdr *iph, struct tcphdr *th, uint32_t server_ack)
+{
     state->client_sock = socket(AF_INET, SOCK_FORGE, 0);
     if (state->client_sock < 0) {
         LogError(state->name, "forget_socket socket() error");
@@ -430,7 +485,6 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
         cleanup_telex(&state);
     }
 
-    uint32_t server_ack = ntohl(th->seq) + (tcp_len - 4*th->doff);  // host order
     struct tcp_state *tcp_st = forge_socket_get_default_state();
     tcp_st->src_ip  = iph->daddr;
     tcp_st->dst_ip  = iph->saddr;
@@ -464,19 +518,101 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     forge_socket_set_state(state->client_sock, tcp_st);
     evutil_make_socket_nonblocking(state->client_sock);
     free(tcp_st);
+}
 
-    // Prepare (but don't send) RST packet for server once we need to tear-down connection
-    make_rst_pkt(state, iph->saddr, iph->daddr, th->source, th->dest, htonl(server_ack));
+void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, size_t tcp_len,
+                     char *tcp_data, char *stego_data, size_t stego_len)
+{
+    size_t master_key_len;
+    char *master_key;
+    unsigned char *server_random, *client_random;
+    char *conn_id;
+    int i;
 
-    // Setup proxy connection
-    state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
-    bufferevent_setcb(state->proxy_bev, readcb, NULL, eventcb, state);
-    if (bufferevent_socket_connect(state->proxy_bev,
-            (struct sockaddr *)&conf->proxy_addr_sin, sizeof(struct sockaddr_in)) < 0) {
-        LogError(state->name, "Bufferevent_socket_connect failed for connecting to proxy");
-        cleanup_telex(&state);
+
+    // Unpack master key
+    master_key_len = stego_data[7];
+    if (master_key_len > stego_len - 8) {
+        master_key_len = stego_len - 8;
+    }
+    master_key = &stego_data[8];
+
+    // Unpack client/server randoms
+    server_random = (unsigned char*)&stego_data[8+master_key_len];
+    client_random = (unsigned char*)&stego_data[8+master_key_len+32];
+    conn_id = &stego_data[8+master_key_len+64];
+
+    SSL *ssl;
+    ssl = get_live_ssl_obj(master_key, master_key_len, htons(0x009e), server_random, client_random);
+
+    char *req_plaintext;
+    if (ssl_decrypt(ssl, tcp_data, tcp_len - 4*th->doff, &req_plaintext) < 0) {
         return;
     }
+
+    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &iph->saddr, src_addr, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &iph->daddr, dst_addr, INET_ADDRSTRLEN);
+
+    // Setup new TCP forge socket
+    // Attach SSL to it
+    // Send response "HTTP/1.1 299 OK SPTELEX\r\n"
+    // create new connection to socks/http proxy
+    // Setup bufferevents for both proxy and forge_socket/TLS and forward between
+    struct telex_st *state;
+
+    state = lookup_conn_id(conf, conn_id);
+    if (!state) {
+        // New, never-before seen connection/proxy connection
+        state = malloc(sizeof(struct telex_st));
+        memset(state, 0, sizeof(struct telex_st));
+        state->conf = conf;
+        if (state == NULL) {
+            LogError("station", "Error: out of memory\n");
+            return;
+        }
+
+        state->proxy_read_tot = 0;
+        conf->num_open_tunnels++;
+        state->id = conf->num_tunnels++;
+
+        snprintf(state->name, sizeof(state->name), "tunnel %lu" , state->id);
+
+        HexDump(LOG_TRACE, state->name, "Created, conn_id: ", conn_id, 16);
+
+        // Setup new proxy connection
+        state->proxy_bev = bufferevent_socket_new(conf->base, -1, BEV_OPT_CLOSE_ON_FREE);
+        bufferevent_setcb(state->proxy_bev, proxy_readcb, NULL, eventcb, state);
+        if (bufferevent_socket_connect(state->proxy_bev,
+                (struct sockaddr *)&conf->proxy_addr_sin, sizeof(struct sockaddr_in)) < 0) {
+            LogError(state->name, "Bufferevent_socket_connect failed for connecting to proxy");
+            cleanup_telex(&state);
+            return;
+        }
+    }
+
+    LogDebug(state->name, "opened %s:%d -> %s:%d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest));
+
+    if (state->ssl) {
+        LogWarn(state->name, "someone left an ssl here...");
+        SSL_free(state->ssl);
+    }
+    state->ssl = ssl;
+
+    if (state->client_bev) {
+        LogWarn(state->name, "someone left a client_bev here...");
+        bufferevent_free(state->client_bev);
+    }
+
+    if (state->client_sock) {
+        LogWarn(state->name, "someone left a client sock here...");
+        close(state->client_sock);
+    }
+
+    // Setup client forge sock
+    uint32_t server_ack = ntohl(th->seq) + (tcp_len - 4*th->doff);  // host order
+    init_forge_socket_conn(state, iph, th, server_ack);
+    state->client_read_tot = 0;
 
     // change SSL bio to use our forge_socket
     BIO *bio = BIO_new_socket(state->client_sock, BIO_NOCLOSE);
@@ -489,13 +625,17 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
                                                        state->ssl,
                                                        BUFFEREVENT_SSL_OPEN,
                                                        0);
-    bufferevent_setcb(state->client_bev, readcb, NULL, eventcb, state);
+    bufferevent_setcb(state->client_bev, client_readcb, NULL, eventcb, state);
+
+    // Prepare (but don't send) RST packet for server once we need to tear-down connection
+    make_rst_pkt(state, iph->saddr, iph->daddr, th->source, th->dest, htonl(server_ack));
 
     // Write the ACK mesage!
-    evbuffer_add_printf(bufferevent_get_output(state->client_bev), "SPTELEX OK");
+    send_init_msg(state);
 
     // Set timeout on connection
-    // TODO: timeout per server that we are impersonating
+    // TODO: timeout/window per server that we are impersonating
+    state->client_read_limit = 16384;
     struct timeval rst_tv = {18, 0};
     state->rst_event = event_new(state->conf->base, -1, 0, rst_and_close, state);
     event_add(state->rst_event, &rst_tv);
