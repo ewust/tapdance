@@ -25,54 +25,14 @@
 #include "ssl_api.h"
 #include "gcm.h"
 #include "logger.h"
+#include "flow.h"
+#include "proxy_map.h"
 
 
 
 #define FLOW_EXPIRE_SECS    10      // note: this is the time between TLS data packets...
 #define PCAP_FILTER_STR     "tcp and port 443"
 #define STEGO_DATA_LEN      200
-
-// Generic type used in a map[(ip,port)] -> flow.value
-// used for both TCP and UDP, though UDP only uses dst_packets and pcap_file.
-// Need to be uniform for cleanup to be able to loop through a single map (could do two maps, but they are very sparse)
-struct flow_t {
-    FILE *pcap_file;    // if non-null, write packets to this
-    struct packets *src_packets;
-    struct packets *dst_packets;
-
-    uint32_t    max_seq;    // TCP optimization: if we receive a higher seq than this, no need to check overlap (host-order)
-
-    struct timeval expire;
-};
-
-struct flow {
-    // Key
-    struct flow *next;
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    uint16_t src_port;
-    uint16_t dst_port;
-
-    // Value
-    struct timeval expire;
-};
-
-// Linked list of keys
-struct flow_key {
-    struct flow_key *next;  // next key
-
-    struct flow *cur;
-};
-
-struct flow_map {
-    struct flow **map;  // actual map
-
-    struct flow_key *keys;
-};
-
-#define MAP_ENTRIES         (1<<18)
-#define HASH_IDX(src_ip,dst_ip,src_port,dst_port)   (((59*(dst_port^src_port))^(src_ip^dst_ip))%MAP_ENTRIES)
-
 
 struct stats_t {
     uint64_t    tot_pkts;
@@ -100,6 +60,9 @@ struct config {
     struct sockaddr_in proxy_addr_sin;
     uint64_t num_tunnels;
     uint32_t num_open_tunnels;
+
+    // Lookup by proxy_id
+    struct proxy_map_entry **proxy_map;
 };
 
 
@@ -110,6 +73,8 @@ struct telex_st {
     int proxy_sock;
     uint64_t id;
     char name[32];
+    char proxy_id[16];
+    struct proxy_map_entry *proxy_entry;
 
     char rst_pkt[sizeof(struct iphdr)+sizeof(struct tcphdr)];
 
@@ -119,6 +84,7 @@ struct telex_st {
 
     uint64_t client_read_tot;
     uint64_t proxy_read_tot;
+    uint32_t client_read_limit;
 };
 
 #endif
