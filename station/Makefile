@@ -6,5 +6,5 @@ LDFLAGS=-L/usr/lib/ -L/usr/local/lib -L/usr/lib/ -lpcap -lcrypto -lssl -levent_c
 all: station
 
 
-station: station.c ssl_api.c logger.c libforge_socket.o
+station: station.c ssl_api.c logger.c libforge_socket.o flow.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
