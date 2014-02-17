@@ -5,9 +5,9 @@ LDFLAGS=-L/usr/lib/ -L/usr/local/lib -L/usr/lib/ -lpcap -lcrypto -lssl -levent_c
 
 all: station
 
-OBJS=libforge_socket.o flow.o tcp.o ssl_api.o logger.o
+OBJS=libforge_socket.o flow.o tcp.o ssl_api.o logger.o proxy_map.o
 
-station: station.c ssl_api.c logger.c libforge_socket.o flow.o tcp.o
+station: station.c $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 clean:

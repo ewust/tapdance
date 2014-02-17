@@ -26,6 +26,7 @@
 #include "gcm.h"
 #include "logger.h"
 #include "flow.h"
+#include "proxy_map.h"
 
 
 
@@ -38,13 +39,6 @@ struct stats_t {
     uint32_t    cur_flows;
     uint32_t    delta_bits;
 };
-
-struct proxy_map_entry {
-    struct proxy_map_entry *next;
-    struct telex_st *state;
-};
-#define PROXY_MAP_ENTRIES   (1<<18)
-#define PROXY_HASH_IDX(id)  (((uint64_t*)id)[0] % PROXY_MAP_ENTRIES)
 
 struct config {
     char    *dev;
@@ -80,6 +74,7 @@ struct telex_st {
     uint64_t id;
     char name[32];
     char proxy_id[16];
+    struct proxy_map_entry *proxy_entry;
 
     char rst_pkt[sizeof(struct iphdr)+sizeof(struct tcphdr)];
 

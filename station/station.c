@@ -3,6 +3,7 @@
 #include "libforge_socket.h"
 #include "flow.h"
 #include "tcp.h"
+#include "proxy_map.h"
 
 void cleanup_telex(struct telex_st **_state)
 {
@@ -44,6 +45,10 @@ void cleanup_telex(struct telex_st **_state)
         // should be done by client_bev free?
         //close(state->client_sock);
         state->client_sock = 0;
+    }
+
+    if (state->proxy_entry) {
+        remove_conn_id(state);
     }
 
     state->conf->num_open_tunnels--;
@@ -98,6 +103,7 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
             // Give the client a small amount of time to create a new connection
             // to continue this one
             tcp_send_rst_pkt(state);    // make sure this one closes...
+            // TODO: set timeout
         } else {
             // Tear down both connections
             //close_telex_conn(state);
@@ -238,49 +244,6 @@ void send_init_msg(struct telex_st *state)
     // TODO: lookup
     msg.win_size = htons(16384);
     evbuffer_add(bufferevent_get_output(state->client_bev), &msg, sizeof(msg));
-}
-
-struct telex_st *lookup_conn_id(struct config *conf, char *conn_id)
-{
-    int idx = PROXY_HASH_IDX(conn_id);
-    struct proxy_map_entry *entry = conf->proxy_map[idx];
-
-    while (entry) {
-        if (memcmp(entry->state->proxy_id, conn_id,
-                   sizeof(entry->state->proxy_id))==0) {
-            return entry->state;
-        }
-        entry = entry->next;
-    }
-    return NULL;
-}
-
-// Assumes it is not already in the map
-void insert_conn_id(struct telex_st *state)
-{
-    struct config *conf = state->conf;
-    int idx = PROXY_HASH_IDX(state->proxy_id);
-    struct proxy_map_entry *new_entry;
-
-    struct proxy_map_entry *entry = conf->proxy_map[idx];
-
-    new_entry = malloc(sizeof(struct proxy_map_entry));
-    if (!new_entry) {
-        LogError(state->name, "can't malloc new_entry for proxy map");
-        return;
-    }
-    new_entry->state = state;
-    new_entry->next = NULL;
-
-    if (!entry) {
-        conf->proxy_map[idx] = new_entry;
-        return;
-    }
-
-    while (entry->next != NULL) {
-        entry = entry->next;
-    }
-    entry->next = new_entry;
 }
 
 void init_forge_socket_conn(struct telex_st *state, struct iphdr *iph, struct tcphdr *th, uint32_t server_ack)
@@ -754,8 +717,9 @@ int main(int argc,char **argv)
     event_add(conf.status_ev, &one_sec);
 
 
-    // Init map
+    // Init maps
     conf.conn_map.map = calloc(sizeof(struct flow*), MAP_ENTRIES);
+    conf.proxy_map = calloc(sizeof(struct proxy_map_entry*), PROXY_MAP_ENTRIES);
 
     // Init raw sock
     conf.raw_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
