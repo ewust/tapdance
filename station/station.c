@@ -27,19 +27,21 @@ void cleanup_ssl(struct telex_st *state)
         state->client_bev = NULL;
     }
 
+    if (state->client_sock_bev) {
+        bufferevent_free(state->client_sock_bev);
+        state->client_sock_bev = NULL;
+    }
+
     if (state->ssl) {
         SSL_free(state->ssl);
         state->ssl = NULL;
     }
 
     if (state->client_sock) {
-        // should be done by client_bev free?
-        close(state->client_sock);
+        // should be done by client_sock_bev free?
+        //close(state->client_sock);
         state->client_sock = 0;
     }
-
-
-
 }
 
 void cleanup_telex(struct telex_st **_state)
@@ -72,15 +74,23 @@ void cleanup_telex(struct telex_st **_state)
 void bev_tcp_reconnect(struct bufferevent *bev, short events, void *arg)
 {
     struct telex_st *state = arg;
+    LogTrace(state->name, "bev_tcp_reconnect");
 
-    bufferevent_free(state->client_bev);
-    state->client_bev = NULL;
+    if (state->client_bev != NULL) {
+        assert(state->client_bev != NULL);
+        bufferevent_free(state->client_bev);
+        state->client_bev = NULL;
+    }
 
-    bufferevent_free(state->client_sock_bev);
-    state->client_sock_bev = NULL;
+    if (state->client_sock_bev) {
+        bufferevent_free(state->client_sock_bev);
+        state->client_sock_bev = NULL;
+    }
 
-    SSL_free(state->ssl);
-    state->ssl = NULL;
+    if (state->ssl) {
+        SSL_free(state->ssl);
+        state->ssl = NULL;
+    }
 
     tcp_send_rst_pkt(state);
 }
@@ -90,8 +100,22 @@ enum { MSG_DATA=0, MSG_INIT, MSG_RECONNECT, MSG_CLOSE };
 
 void send_close_msg(struct telex_st *state, uint8_t msg_type)
 {
-    LogTrace(state->name, "Sending close message %02x", msg_type);
+    LogTrace(state->name, "Sending close message %02x; %d bytes remain from proxy, %d bytes pending to client",
+             msg_type, evbuffer_get_length(bufferevent_get_input(state->proxy_bev)),
+             evbuffer_get_length(bufferevent_get_output(state->client_bev)));
+
+    if (!state->ssl || !state->client_bev) {
+        cleanup_telex(&state);
+        return;
+    }
+
     evbuffer_add(bufferevent_get_output(state->client_bev), &msg_type, sizeof(msg_type));
+
+    if (!state->ssl) {
+        LogWarn(state->name, "you found the bug");
+        cleanup_telex(&state);
+        return;
+    }
 
     SSL_set_shutdown(state->ssl, SSL_RECEIVED_SHUTDOWN);
     SSL_shutdown(state->ssl);
@@ -104,6 +128,12 @@ void send_close_msg(struct telex_st *state, uint8_t msg_type)
     } else {
         bufferevent_setcb(state->client_sock_bev, NULL, NULL, bev_tcp_close, state);
     }
+
+    //bufferevent_free(state->client_bev);
+    //state->client_bev = NULL;
+
+    //event_free(state->rst_event);
+    //state->rst_event = NULL;
 }
 
 
@@ -115,18 +145,22 @@ void rst_and_close(evutil_socket_t fd, short events, void *arg)
 
     LogTrace(state->name, "Close and RST timeout");
 
-    send_close_msg(state, MSG_RECONNECT);
+    if (state->client_bev) {
+        send_close_msg(state, MSG_RECONNECT);
+        if (!state->proxy_bev) {
+            // send_close did cleanup for us
+            return;
+        }
+        bufferevent_disable(state->proxy_bev, EV_READ);
+    } else {
+        // Too late, kill it, hope it fires what is needed???
+        tcp_send_rst_pkt(state);
+        cleanup_telex(&state);
+        //bufferevent_free(state->client_sock_bev);
+    }
 
     // TODO: Setup a cleanup timeout
     //cleanup_telex(&state);
-}
-
-void bev_tcp_close(struct bufferevent *bev, short events, void *arg)
-{
-    struct telex_st *state = arg;
-    LogTrace(state->name, "bev_tcp_close");
-    tcp_send_rst_pkt(state);
-    cleanup_telex(&state);
 }
 
 #define ISCLIENT(bev, state) ((bev) == (state)->client_bev)
@@ -135,6 +169,14 @@ void bev_tcp_close(struct bufferevent *bev, short events, void *arg)
     (ISPROXY((bev),(state)) ? "proxy" : "other" ))
 #define OTHER_BEV(bev, state) (ISCLIENT((bev),(state)) ? state->proxy_bev : \
     (ISPROXY((bev),(state)) ? state->client_bev : NULL ))
+
+void bev_tcp_close(struct bufferevent *bev, short events, void *arg)
+{
+    struct telex_st *state = arg;
+    LogTrace(state->name, "bev_tcp_close %s, %04x", PARTY(bev, state), events);
+    tcp_send_rst_pkt(state);
+    cleanup_telex(&state);
+}
 
 void eventcb(struct bufferevent *bev, short events, void *arg)
 {
@@ -206,6 +248,8 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
             tcp_send_rst_pkt(state);    // make sure this one closes...
             cleanup_ssl(state);
         }
+    } else {
+        LogDebug(state->name, "%s EVENT_???: %04x", PARTY(bev, state), events);
     }
 }
 
@@ -470,22 +514,26 @@ void init_telex_conn(struct config *conf, struct iphdr *iph, struct tcphdr *th, 
     if (state->ssl) {
         LogWarn(state->name, "someone left an ssl here...");
         SSL_free(state->ssl);
+        state->ssl = NULL;
     }
     state->ssl = ssl;
 
     if (state->client_bev) {
         LogWarn(state->name, "someone left a client_bev here...");
         bufferevent_free(state->client_bev);
+        state->client_bev = NULL;
     }
 
     if (state->client_sock_bev) {
         LogWarn(state->name, "someone left a client_sock_bev here...");
         bufferevent_free(state->client_sock_bev);
+        state->client_sock_bev = NULL;
     }
 
     if (state->client_sock) {
         LogWarn(state->name, "someone left a client sock here...");
         close(state->client_sock);
+        state->client_sock = 0;
     }
 
     // Setup client forge sock
@@ -719,7 +767,7 @@ int main(int argc,char **argv)
     conf.proxy_addr_sin.sin_port = htons(8123);
 
     LogOutputLevel(LOG_INFO); // show warnings and more severe
-    LogOutputStream(stdout);
+    LogOutputStream(stderr);
 
     int c;
     int option_index = 0;
