@@ -78,9 +78,10 @@ struct telex_st {
 
     char rst_pkt[sizeof(struct iphdr)+sizeof(struct tcphdr)];
 
-    struct bufferevent *client_bev;
-    struct bufferevent *proxy_bev;
-    struct event *rst_event;
+    struct bufferevent *client_sock_bev;    // underlying forge socket bev
+    struct bufferevent *client_bev;         // SSL bev
+    struct bufferevent *proxy_bev;          // local proxy BEV
+    struct event *rst_event;                // when we need to end the SSL connection by
 
     uint64_t client_read_tot;
     uint64_t proxy_read_tot;
