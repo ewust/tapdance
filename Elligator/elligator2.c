@@ -68,6 +68,11 @@ int main(){
         
     }
     printf(" \n ");
+    
+    
+    // Test decode function
+    
+    decode(test, test_string);
 
     
 
@@ -83,14 +88,99 @@ int main(){
 }
 
 
-// TO DO
+// TO DO: need to also export sign of y
 // Decode function
 int decode(unsigned char *out, const unsigned char *in){
+    
+    // declare curve_prime as 2^255-19
+    mpz_t curve_prime;
+    mpz_init(curve_prime);
+    mpz_set_si(curve_prime, 1);
+    mpz_mul_2exp(curve_prime, curve_prime, 255);
+    mpz_sub_ui(curve_prime, curve_prime, 19);
+    
+    // declare A
+    mpz_t coeff_A;
+    mpz_init(coeff_A);
+    mpz_set_si(coeff_A, 486662);
+    
+    // declare non-square u in F_p. Fixed to 2.
+    mpz_t non_square_u;
+    mpz_init(non_square_u);
+    mpz_set_si(non_square_u, 2);
+    
+    //**************
+    
+    
+    // import "in" as field element r in mpz_t type
+    mpz_t field_element_r;
+    mpz_init(field_element_r);
+    mpz_import(field_element_r, 32, -1, 1, -1, 0, in);
 
-
-
-
-
+    // Print field element out
+    gmp_printf("field element r in decode function contains %Zd \n", field_element_r);
+    
+    // Declare variables for computation of curve point
+    mpz_t vee;
+    mpz_init(vee);
+    
+    mpz_t epsilon;
+    mpz_init(epsilon);
+    
+    mpz_t x_coord;
+    mpz_init(x_coord);
+    
+    mpz_t y_coord;
+    mpz_init(y_coord);
+    
+    // Compute curve point
+    mpz_mul(vee, field_element_r, field_element_r);
+    mpz_mod(vee, vee, curve_prime);
+    mpz_mul(vee, vee, non_square_u);
+    mpz_mod(vee, vee, curve_prime);
+    mpz_add_ui(vee, vee, 1);
+    mpz_invert(vee, vee, curve_prime);
+    mpz_mul(vee, vee, coeff_A);
+    mpz_mod(vee, vee, curve_prime);
+    mpz_neg(vee, vee); // v = -A/(1+u*r^2)
+    
+    mpz_mul(epsilon,vee,vee);
+    mpz_addmul_ui(epsilon, vee,486662); //gmp_printf("v^2 + Av should be %Zd\n", y_squared);
+    mpz_mod(epsilon, epsilon, curve_prime);
+    mpz_add_ui(epsilon,epsilon,1); //gmp_printf("x_coord^2 + Ax + 1 should be %Zd\n", y_squared);
+    mpz_mod(epsilon, epsilon, curve_prime);
+    mpz_mul(epsilon, epsilon, vee); // should now be v^3 + A*v^2 + v
+    mpz_mod(epsilon, epsilon, curve_prime);
+    
+    int chi;
+    chi = mpz_legendre(epsilon, curve_prime);
+    
+    if(chi==1){
+        mpz_set(x_coord, vee); // x = v
+    }
+    
+    else{
+        mpz_set(x_coord, vee);
+        mpz_neg(x_coord, x_coord);
+        mpz_sub(x_coord, x_coord, coeff_A); // x = -v - A
+    }
+    
+    
+    calc_y(y_coord, x_coord);
+    mpz_mul_si(y_coord, y_coord, -chi);
+    
+    gmp_printf ("var in decode function x_coord now has %Zd \n", x_coord);
+    gmp_printf ("var in decode function y_coord now has %Zd \n", y_coord);
+    
+    // Export x_coord as 32-byte string
+    size_t out_len; //gmp_printf("out_len is %d \n ", out_len);
+    mpz_export(out, &out_len, -1, 1, -1, 0, x_coord);
+    
+    
+    mpz_clear(field_element_r);
+    mpz_clear(non_square_u);
+    mpz_clear(coeff_A);
+    mpz_clear(curve_prime);
 
 }
 
@@ -244,7 +334,7 @@ int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
     mpz_clear(r_hat);
     mpz_clear(non_square_u);
 
-
+    return 1;
 }
 
 
