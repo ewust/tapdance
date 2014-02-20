@@ -19,10 +19,8 @@ int is_encodable(const mpz_t);
 int main(){
     
     unsigned char test_string[32];
-    static unsigned char test[4] = {0x15,0xCD, 0x5B, 0x07
+    static unsigned char test[32] = {
     };
-    
-   
     
     // Test square root function
     mpz_t test_square;
@@ -39,14 +37,14 @@ int main(){
     // Test calc_y function
     mpz_t test_xcoord;
     mpz_init(test_xcoord);
-    mpz_set_si(test_xcoord,123456789);
+    mpz_set_str(test_xcoord,"-4a0a21fd87cd5386a1091f0fb9e482f9ce3ddcee704d3d5223e08f9d2531e750",16);
     
     mpz_t test_ycoord;
     mpz_init(test_ycoord);
     
     mpz_t test_sign_bit;
     mpz_init(test_sign_bit);
-    mpz_set_si(test_sign_bit,1);
+    mpz_set_si(test_sign_bit,-1);
     
     calc_y(test_ycoord, test_xcoord);
     gmp_printf("test_xcoord value is %Zd \n", test_xcoord);
@@ -88,7 +86,7 @@ int main(){
 }
 
 
-// TO DO: need to also export sign of y
+// TO DO: need to also export sign of y.
 // Decode function
 int decode(unsigned char *out, const unsigned char *in){
     
@@ -165,11 +163,14 @@ int decode(unsigned char *out, const unsigned char *in){
         mpz_sub(x_coord, x_coord, coeff_A); // x = -v - A
     }
     
-    
+    gmp_printf ("var in decode function x_coord now has %Zd \n", x_coord);
+    gmp_printf ("var in decode function y_coord now has %Zd \n", y_coord);
     calc_y(y_coord, x_coord);
+    gmp_printf ("var in decode function y_coord now has %Zd \n", y_coord);
+    
     mpz_mul_si(y_coord, y_coord, -chi);
     
-    gmp_printf ("var in decode function x_coord now has %Zd \n", x_coord);
+    
     gmp_printf ("var in decode function y_coord now has %Zd \n", y_coord);
     
     // Export x_coord as 32-byte string
@@ -177,6 +178,8 @@ int decode(unsigned char *out, const unsigned char *in){
     mpz_export(out, &out_len, -1, 1, -1, 0, x_coord);
     
     
+    mpz_clear(x_coord);
+    mpz_clear(y_coord);
     mpz_clear(field_element_r);
     mpz_clear(non_square_u);
     mpz_clear(coeff_A);
@@ -500,7 +503,7 @@ int calc_y(mpz_t y_coord, const mpz_t x_coord){
     mpz_mul(y_squared, y_squared, x_coord); // should now be y^2
     //gmp_printf ("Now %Zd\n is x_coord^3+Ax^2 + x \n", y_squared);
     
-    //gmp_printf("Legendre of y_squared is %i \n ", mpz_legendre(y_squared, curve_prime));
+    gmp_printf("Legendre of y_squared is %i \n ", mpz_legendre(y_squared, curve_prime));
     if(mpz_legendre(y_squared, curve_prime)==1){
         
          // compute y
@@ -511,7 +514,8 @@ int calc_y(mpz_t y_coord, const mpz_t x_coord){
     }
     else if (mpz_legendre(y_squared, curve_prime)==-1){
         // not on curve
-        //gmp_printf("point not on curve \n ");
+        gmp_printf("point not on curve \n ");
+        mpz_set_si(y_coord,0);
         return 0;
         
     }

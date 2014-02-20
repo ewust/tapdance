@@ -40,3 +40,11 @@ y=9094040566125962849133224048217411091405536248825867518642941381412595940312
 2. x=2
 not on curve.
 
+*****************
+
+Test of x not on curve, but encodable:
+0x4a0a21fd87cd5386a1091f0fb9e482f9ce3ddcee704d3d5223e08f9d252a7a4a
+
+encoding anyway and then decoding outputs the point (-x-A), sign-bit for y: -1 on the curve.
+
+
