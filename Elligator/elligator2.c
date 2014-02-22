@@ -28,7 +28,7 @@ int main(){
     // If already in proper form:
     unsigned char curve_point[32]={0x25,  0xe5,  0xd3,  0x6d,  0xab,  0xe9,  0xb5,  0xf0,  0xc9,
         0xbb,  0x68,  0x5e,  0x7b,  0x87,  0xec,  0xdc,  0xb9,  0x41,  0xd2,  0x67,  0x94,  0xf6,
-        0x66,  0x3c,  0xcd,  0xb8,  0x67,  0xaf,  0xeb,  0x55,  0x63,  0xa0
+        0x66,  0x3c,  0xcd,  0xb8,  0x67,  0xaf,  0xeb,  0x55,  0x63,  0x20
     };
     
     mpz_t test_xcoord;
@@ -36,14 +36,16 @@ int main(){
     mpz_t test_ycoord;
     mpz_init(test_ycoord);
     
+    int sign_bit = 0;
+    
+    
     // Otherwise:
     //*************
+    /*
     // Comment out following if using curve_point defined above:
     mpz_set_str(test_xcoord,"206355ebaf67b8cd3c66f69467d241b9dcec877b5e68bbc9f0b5e9ab6dd3e525",16);
     size_t out_len;
     mpz_export(curve_point, &out_len, -1, 1, -1, 0, test_xcoord);
-    
-    int sign_bit = 0; // don't comment out
     
     // Change most significant bit to be sign of y_coord
     if(sign_bit==1){
@@ -53,8 +55,9 @@ int main(){
         
         curve_point[31] &= 0x7f; // puts 0 for positive sign
     }
+    */
     //*************
-    
+   
     
     // Import point to gmp
     unsigned char curve_point_copy[32];
@@ -186,7 +189,7 @@ int decode(unsigned char *out, const unsigned char *in){
     }
 
     // Print field element out
-    gmp_printf("\t Decode says point corresponds to r = %Zd in F_p \n", field_element_r);
+    // gmp_printf("\t Decode says point corresponds to r = %Zd in F_p \n", field_element_r);
     
     // Declare variables for computation of curve point
     mpz_t vee;
@@ -235,6 +238,7 @@ int decode(unsigned char *out, const unsigned char *in){
         mpz_mod(x_coord,x_coord,curve_prime); // make sure x is positive
     }
     
+    /* Test stuff
     // Not actually necessary to do this calculation
     calc_y(y_coord, x_coord);
     
@@ -243,12 +247,13 @@ int decode(unsigned char *out, const unsigned char *in){
     
     gmp_printf ("\t Decode says x_coord is %Zd \n", x_coord);
     gmp_printf ("\t Decode says y_coord is %Zd \n", y_coord);
+    */
     
     // Export x_coord as 32-byte string in little endian
     size_t out_len; //gmp_printf("out_len is %d \n ", out_len);
     mpz_export(out, &out_len, -1, 1, -1, 0, x_coord);
     
-    // Test stuff
+    /* Test stuff
     printf("\t Represent output of Decode as string: ");
     
     int count;
@@ -257,11 +262,14 @@ int decode(unsigned char *out, const unsigned char *in){
         
     }
     printf(" \n ");
+    */
     
+    /* Test stuff
     mpz_import(x_coord, 32, -1, 1, -1, 0, out);
     gmp_printf ("\t Decode says x_coord is %Zd \n", x_coord);
     
     gmp_printf( "\t sign of y as an integer is negation of %i \n", chi);
+    */
     
     // Change most significant bit to be sign of y_coord
     if(chi==1){
@@ -364,7 +372,7 @@ int encode(unsigned char *out, const unsigned char *in){
     // Extract x coordinate
     in_copy[31] &= 0x7f;
     mpz_import(x_coord,32,-1,1,-1,0, in_copy);
-    gmp_printf ("Encode: x coordinate is %Zd \n", x_coord);
+    // gmp_printf ("Encode: x coordinate is %Zd \n", x_coord);
     
     // declare r_hat, r_hat_squared
     mpz_t r_hat_squared;
@@ -395,7 +403,7 @@ int encode(unsigned char *out, const unsigned char *in){
             mpz_neg(r_hat_squared, r_hat_squared); // negate
             // gmp_printf("r_hat squared should be %Zd \n", r_hat_squared);
             square_root(r_hat, r_hat_squared); // calculate final r_hat
-            gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
+            // gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
             
         }
         
@@ -415,13 +423,13 @@ int encode(unsigned char *out, const unsigned char *in){
             
             // gmp_printf("r_hat squared should be %Zd \n", r_hat_squared);
             square_root(r_hat, r_hat_squared); // calculate final r_hat
-            gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
+            // gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
             
             
         }
         
         else {
-            gmp_printf( "\t Warning: not correct sign bit?\n");
+            // gmp_printf( "\t Warning: not correct sign bit?\n");
             result = 0; // bad sign bit?
         }
         
@@ -432,7 +440,7 @@ int encode(unsigned char *out, const unsigned char *in){
         
     }
     else{
-        gmp_printf ("\t Encode says x-coord is not encodable \n");
+        // gmp_printf ("\t Encode says x-coord is not encodable \n");
         result = 0;
         
     }
