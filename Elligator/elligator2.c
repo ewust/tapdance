@@ -243,7 +243,7 @@ int encode(unsigned char *out, const unsigned char *in){
     // Import curve point
     // Get sign bit
     int sign_bit = (in[31] & 0x80) == 0x80;
-    printf("Encode: Sign bit of y is %i \n", sign_bit);
+    //printf("Encode: Sign bit of y is %i \n", sign_bit);
     
     // Mask out high-order bit
     // Extract x coordinate
@@ -265,7 +265,7 @@ int encode(unsigned char *out, const unsigned char *in){
     int result;
     
     if(is_encodable(x_coord)==1){
-        gmp_printf("\t Encode says x-coord is encodable! \n");
+        //gmp_printf("\t Encode says x-coord is encodable! \n");
         
         if(sign_bit==0){
             
