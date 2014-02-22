@@ -15,10 +15,10 @@
 int decode(unsigned char *out, const unsigned char *in);
 
 
-// Takes as input 32 byte encodable curve25519 point
-// Outputs 255-bit (little endian) string padded to 32 bytes
-//void encode(unsigned char *out, const unsigned char*in);
+// Takes as input 32 byte little endian encodable curve25519 point;
+// high order bit is sign of y value
+// Outputs 255-bit (little endian) uniform-looking 32-byte string
 // Returns 0 if point could not be encoded as a string, returns 1 otherwise
-int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit);
+int encode(unsigned char *out, const unsigned char *in);
 
 #endif
