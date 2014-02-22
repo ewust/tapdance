@@ -8,83 +8,130 @@
 
 #include <stdio.h>
 #include <gmp.h>
+#include <string.h>
 #include "elligator2.h"
 void square_root(mpz_t root, const mpz_t square);
 int calc_y(mpz_t y_coord, const mpz_t x_coord);
 int is_encodable(const mpz_t);
 
 // To Do
-// Fix Encode so that API does not rely on gmp
-// Fix Decode so that out is a 32-byte encoding of x-coord and sign bit of y-coord
-// Need to link in curve25519 and test interoperability with inputs/outputs; other code for DH?
+// other code for DH?
 // Clean up code ....
 // Some tests
 
 int main(){
     
-    unsigned char test_string[32];
-    static unsigned char test[32] = {
-    };
-    
-    // Test square root function
-    mpz_t test_square;
-    mpz_init(test_square);
-    mpz_set_si(test_square,-4752188672138712967);
-    
-    mpz_t test_root;
-    mpz_init(test_root);
-    
-   // square_root(test_root,test_square);
-    //gmp_printf("test square value is %Zd \n", test_square);
-    //gmp_printf("test root value is %Zd \n", test_root);
+    unsigned char test_string[32]; memset(test_string,0,32);
+    unsigned char test[32]; memset(test,0,32);
     
     // Test input point
-    // x value
+    // If already in proper form:
+    unsigned char curve_point[32]={0x25,  0xe5,  0xd3,  0x6d,  0xab,  0xe9,  0xb5,  0xf0,  0xc9,
+        0xbb,  0x68,  0x5e,  0x7b,  0x87,  0xec,  0xdc,  0xb9,  0x41,  0xd2,  0x67,  0x94,  0xf6,
+        0x66,  0x3c,  0xcd,  0xb8,  0x67,  0xaf,  0xeb,  0x55,  0x63,  0xa0
+    };
+    
     mpz_t test_xcoord;
     mpz_init(test_xcoord);
-    mpz_set_str(test_xcoord,"4a0a21fd87cd5386a1091f0fb9e482f9ce3ddcee704d3d5223e08f9d252a7a4a",16);
-    
-    // y value (sign suffices for montgomery curves)
-    mpz_t test_sign_bit;
-    mpz_init(test_sign_bit);
-    mpz_set_si(test_sign_bit,-1);
-    
     mpz_t test_ycoord;
     mpz_init(test_ycoord);
     
+    // Otherwise:
+    //*************
+    // Comment out following if using curve_point defined above:
+    mpz_set_str(test_xcoord,"206355ebaf67b8cd3c66f69467d241b9dcec877b5e68bbc9f0b5e9ab6dd3e525",16);
+    size_t out_len;
+    mpz_export(curve_point, &out_len, -1, 1, -1, 0, test_xcoord);
+    
+    int sign_bit = 0; // don't comment out
+    
+    // Change most significant bit to be sign of y_coord
+    if(sign_bit==1){
+        curve_point[31] |= 0x80; // puts 1 for negative sign
+    }
+    else{
+        
+        curve_point[31] &= 0x7f; // puts 0 for positive sign
+    }
+    //*************
+    
+    
+    // Import point to gmp
+    unsigned char curve_point_copy[32];
+    memcpy(curve_point_copy, curve_point, 32);
+    
+    // Get sign bit
+    sign_bit = (curve_point_copy[31] & 0x80) == 0x80;
+
+    // Mask out high-order bit
+    // Extract x coordinate
+    curve_point_copy[31] &= 0x7f;
+    mpz_import(test_xcoord,32,-1,1,-1,0, curve_point_copy);
+    
     // Tests whether x value corresponds to point on curve or not
     // Prints corresponding y value if yes. Takes canonical square root.
+    printf("Testing if x values corresponds to point on curve and calculating y ... \n");
     calc_y(test_ycoord, test_xcoord);
-    gmp_printf("Main: test xcoord value is %Zd \n", test_xcoord);
+    gmp_printf("Main: x coordinate is %Zd \n", test_xcoord);
     
     if(calc_y(test_ycoord, test_xcoord)==1){
         
-        gmp_printf("Main: test_ycoord value is %Zd \n", test_ycoord);
+        if (sign_bit ==1){
+            mpz_neg(test_ycoord, test_ycoord);
+        }
+                       
+        gmp_printf("Main: y coordinate is %Zd \n", test_ycoord);
     
     }
     else gmp_printf("Warning! No such point on curve (main function) \n");
     
     // Test encode function
-    encode(test_string, test_xcoord, test_sign_bit);
+    printf("Encoding point as string now ... \n");
+    encode(test_string, curve_point);
     
     // Writes string to screen;
-    printf("Point encoded as string is ");
+    printf("Point encoded as uniform-looking string is:\n");
     int count;
     for(count=0; count < 32;++count){
         gmp_printf(" %x ", test_string[count]);
         
     }
-    printf(" \n ");
+    printf(" \n");
     
     
     // Test decode function
-    
+    printf ("Testing decode function now ....\n");
     decode(test, test_string);
-
     
-    mpz_clear(test_sign_bit);
-    mpz_clear(test_root);
-    mpz_clear(test_square);
+    // Writes string to screen;
+    printf("Represent output of Decode in little endian 32-byte char:");
+    
+    for(count=0; count < 32;++count){
+        gmp_printf(" 0x%x, ", test[count]);
+        
+    }
+    printf(" \n");
+    
+    // Test to get point back
+    // Get sign bit
+    int has_sign = (test[31] & 0x80) == 0x80;
+    printf("Main: Sign bit of y is %i \n", has_sign);
+    
+    // Mask out high-order bit
+    // Extract x coordinate
+    test[31] &= 0x7f;
+    mpz_import(test_xcoord,32,-1,1,-1,0, test);
+    gmp_printf ("Main: Decode says x coordinate is %Zd \n", test_xcoord);
+    
+    // Calculate y coordinate
+    calc_y(test_ycoord, test_xcoord);
+    if( has_sign == 1){
+        mpz_neg(test_ycoord, test_ycoord);
+    }
+    
+    gmp_printf ("Main: Corresponding y value is %Zd \n", test_ycoord);
+    
+    
     mpz_clear(test_xcoord);
     mpz_clear(test_ycoord);
     
@@ -92,8 +139,8 @@ int main(){
 }
 
 
-// TO DO: need to also export sign of y.
 // Decode function
+// Outputs elliptic curve point as 32 byte little endian; high order bit is sign of y
 // Returns 0 if it fails (and string is not in S= {0, ..., (p-1)/2}), else returns 1
 int decode(unsigned char *out, const unsigned char *in){
     
@@ -116,6 +163,9 @@ int decode(unsigned char *out, const unsigned char *in){
     //**************
     int result;
     
+    // initialize out to 0
+    memset(out,0,32);
+    
     // import (p-1)/2.
     mpz_t upper_bound;
     mpz_init(upper_bound);
@@ -136,7 +186,7 @@ int decode(unsigned char *out, const unsigned char *in){
     }
 
     // Print field element out
-    gmp_printf("Decode says point corresponds to r = %Zd in F_p \n", field_element_r);
+    gmp_printf("\t Decode says point corresponds to r = %Zd in F_p \n", field_element_r);
     
     // Declare variables for computation of curve point
     mpz_t vee;
@@ -175,12 +225,14 @@ int decode(unsigned char *out, const unsigned char *in){
     
     if(chi==1){
         mpz_set(x_coord, vee); // x = v
+        mpz_mod(x_coord,x_coord,curve_prime); // make sure x is positive
     }
     
     else{
         mpz_set(x_coord, vee);
         mpz_neg(x_coord, x_coord);
         mpz_sub(x_coord, x_coord, coeff_A); // x = -v - A
+        mpz_mod(x_coord,x_coord,curve_prime); // make sure x is positive
     }
     
     // Not actually necessary to do this calculation
@@ -189,14 +241,36 @@ int decode(unsigned char *out, const unsigned char *in){
     // Negate y_coord if needed
     mpz_mul_si(y_coord, y_coord, -chi);
     
-    gmp_printf ("Decode says x_coord is %Zd \n", x_coord);
-    gmp_printf ("Decode says y_coord is %Zd \n", y_coord);
+    gmp_printf ("\t Decode says x_coord is %Zd \n", x_coord);
+    gmp_printf ("\t Decode says y_coord is %Zd \n", y_coord);
     
-    // Export x_coord as 32-byte string
+    // Export x_coord as 32-byte string in little endian
     size_t out_len; //gmp_printf("out_len is %d \n ", out_len);
     mpz_export(out, &out_len, -1, 1, -1, 0, x_coord);
     
-    // Export sign bit of y-coord....?
+    // Test stuff
+    printf("\t Represent output of Decode as string: ");
+    
+    int count;
+    for(count=0; count < 32;++count){
+        gmp_printf(" %x ", out[count]);
+        
+    }
+    printf(" \n ");
+    
+    mpz_import(x_coord, 32, -1, 1, -1, 0, out);
+    gmp_printf ("\t Decode says x_coord is %Zd \n", x_coord);
+    
+    gmp_printf( "\t sign of y as an integer is negation of %i \n", chi);
+    
+    // Change most significant bit to be sign of y_coord
+    if(chi==1){
+        out[31] |= 0x80; // puts 1 for negative sign
+    }
+    else{
+    
+        out[31] &= 0x7f; // puts 0 for positive sign
+    }
     
     mpz_clear(x_coord);
     mpz_clear(y_coord);
@@ -256,7 +330,8 @@ int is_encodable(const mpz_t x_coord){
         
 // TO DO: fix inputs to not rely on gmp
 // Encode function
-int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
+// Assumes input point is 32 bytes in little endian. High-order bit is sign of y coordinate
+int encode(unsigned char *out, const unsigned char *in){
     
     //declare curve_prime as 2^255-19
     mpz_t curve_prime;
@@ -274,7 +349,22 @@ int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
     mpz_set_si(coeff_A, 486662);
     
     //***********
+    mpz_t x_coord;
+    mpz_init(x_coord);
     
+    unsigned char in_copy[32];
+    memcpy(in_copy, in, 32);
+    
+    // Import curve point
+    // Get sign bit
+    int sign_bit = (in[31] & 0x80) == 0x80;
+    printf("Encode: Sign bit of y is %i \n", sign_bit);
+    
+    // Mask out high-order bit
+    // Extract x coordinate
+    in_copy[31] &= 0x7f;
+    mpz_import(x_coord,32,-1,1,-1,0, in_copy);
+    gmp_printf ("Encode: x coordinate is %Zd \n", x_coord);
     
     // declare r_hat, r_hat_squared
     mpz_t r_hat_squared;
@@ -289,35 +379,35 @@ int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
     // result int
     int result;
     
-    if(is_encodable(in)==1){
-        gmp_printf("Encode says x-coord is encodable! \n ");
+    if(is_encodable(x_coord)==1){
+        gmp_printf("\t Encode says x-coord is encodable! \n");
         
-        if(mpz_cmp_si(in_sign_bit,1)==0){
+        if(sign_bit==0){
             
             //gmp_printf(" canonical y \n ");
             
-            mpz_set(r_hat_squared, in); // r_hat is x
+            mpz_set(r_hat_squared, x_coord); // r_hat is x
             mpz_add(r_hat_squared, r_hat_squared, coeff_A); //r_hat is x+A
             mpz_mul(r_hat_squared, r_hat_squared, non_square_u); //r_hat is 2(x+A)
             mpz_invert(r_hat_squared,r_hat_squared, curve_prime); //r_hat is inverse of 2(x+A)
-            mpz_mul(r_hat_squared, r_hat_squared, in); //r_hat is x/(2(x+A))
+            mpz_mul(r_hat_squared, r_hat_squared, x_coord); //r_hat is x/(2(x+A))
             mpz_mod(r_hat_squared, r_hat_squared, curve_prime); // reduce
             mpz_neg(r_hat_squared, r_hat_squared); // negate
             // gmp_printf("r_hat squared should be %Zd \n", r_hat_squared);
             square_root(r_hat, r_hat_squared); // calculate final r_hat
-            gmp_printf("Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
+            gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
             
         }
         
-        else if(mpz_cmp_si(in_sign_bit,-1)==0){
+        else if(sign_bit==1){
             
             //gmp_printf(" not canonical y \n ");
             
-            mpz_set(r_hat_squared, in); // r_hat is x
+            mpz_set(r_hat_squared, x_coord); // r_hat is x
             mpz_mul(r_hat_squared, r_hat_squared, non_square_u); // 2*x
             mpz_invert(r_hat_squared,r_hat_squared, curve_prime); //r_hat_squared is inverse of 2*x
             
-            mpz_add(temp, in, coeff_A); // temp is x+A
+            mpz_add(temp, x_coord, coeff_A); // temp is x+A
             mpz_neg(temp,temp); // temp is -(x+A)
             
             mpz_mul(r_hat_squared, r_hat_squared, temp); //r_hat is -(x+A)/(2x)
@@ -325,13 +415,13 @@ int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
             
             // gmp_printf("r_hat squared should be %Zd \n", r_hat_squared);
             square_root(r_hat, r_hat_squared); // calculate final r_hat
-            gmp_printf("Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
+            gmp_printf("\t Encode says point corresponds to r_hat = %Zd in F_p \n", r_hat);
             
             
         }
         
         else {
-            gmp_printf( "Warning: not correct sign bit?");
+            gmp_printf( "\t Warning: not correct sign bit?\n");
             result = 0; // bad sign bit?
         }
         
@@ -342,7 +432,7 @@ int encode(unsigned char *out, const mpz_t in, const mpz_t in_sign_bit){
         
     }
     else{
-        gmp_printf ("Encode says x-coord is not encodable \n ");
+        gmp_printf ("\t Encode says x-coord is not encodable \n");
         result = 0;
         
     }
@@ -530,3 +620,4 @@ int calc_y(mpz_t y_coord, const mpz_t x_coord){
     return result;
    
 }
+
