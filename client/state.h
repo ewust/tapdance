@@ -60,6 +60,22 @@ struct telex_state
 
 	// SSL connection object and Telex crypto state
 	SSL *ssl;
+
+    // random per-connection (secret) id;
+    // this way, the underlying SSL connection can disconnect
+    // while the client's local conn and station's proxy conn
+    // can stay connected
+    char remote_conn_id[16];
+
+    // Set to 1 as soon as we learn (from proxy channel) that
+    // we need to. This keeps a ISREMOTE EV_ERROR or EOF from cleaning
+    // up the state
+    int retry_conn;
+
+    // Maximum amount of data we can send to the station
+    // before we should tear-down the connection for a new one
+    // with the same remote_conn_id
+    size_t max_send;
 };
 
 #endif//_STATE_H_

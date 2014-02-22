@@ -1,4 +1,4 @@
-// JAH 4/2011
+/* JAH 4/2011 */
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -13,13 +13,13 @@
 
 static enum LogLevel log_output_level = LOG_INFO;
 static FILE *log_output_stream = NULL;
-static char *log_level_name[] = 
+static const char *log_level_name[] =
   { "FATAL", "ERROR", "WARN ", "INFO ", "DEBUG", "TRACE" };
 
 int LogLogVA(enum LogLevel level, const char *loggerName, const char *logMessage, va_list args)
-{	
+{
 	if (log_output_stream && level <= log_output_level) {
-		char *levelName;		
+		const char *levelName;
 		if (level < 0 || level >= sizeof(log_level_name)) {
 			levelName = "UNKNOWN";
 		} else {
@@ -34,7 +34,7 @@ int LogLogVA(enum LogLevel level, const char *loggerName, const char *logMessage
 		strftime(timestamp, 20, "%b %d %H:%M:%S", ptm);
 		fprintf(log_output_stream, "%s.%03ld [%s] ", 
 			timestamp, now.tv_usec/1000, levelName);
-		
+
 		if (loggerName) {
 			fprintf(log_output_stream, "%s: ", loggerName);
 		}
@@ -112,7 +112,7 @@ void HexDump(enum LogLevel level, const char *loggerName, const char *message, v
 	p += strlen(p);
 	for (i = 0; i < len; i += 16) {
 		for (j = i; j < i+16 && j < len; j++) {
-			snprintf(p, 3, "%02X ", (unsigned char)data[j]);
+			snprintf(p, 4, "%02X ", (unsigned char)data[j]);
 			p += 3;
 		}
 		for (; j < i+16 + 1; j++) {
@@ -122,10 +122,11 @@ void HexDump(enum LogLevel level, const char *loggerName, const char *message, v
 		for (j = i; j < i+16 && j < len; j++) {
 			unsigned char c = (unsigned char)data[j];
 			*(p++) = ((c >= ' ' && c <= '~') ? c : '.');
-		}        
+		}
 		if (i + 16 < len) {
-			strncpy(p, "\n", strlen("\n"));
-			p += strlen("\n");
+			//strncpy(p, "\n", strlen("\n"));
+            *p++ = '\n';
+			//p += strlen("\n");
 		}
 	}
 	*p = '\0';
