@@ -1,7 +1,7 @@
 #INCLUDE=-I./req/local/include
 #LIB=-L./req/local/lib
-INCLUDE=-I/usr/include
-LIB=-L/usr/lib
+INCLUDE=-I/usr/include -I../Elligator/
+LIB=-L/usr/lib -lgmp
 
 # Uncomment these 2 lines if you installed openssl/libevent
 # to the default location /usr/local (e.g. no ./configure --prefix=)
@@ -19,7 +19,7 @@ CFLAGS=-g -Wall $(INCLUDE) \
 	-fstack-protector-all -fwrapv -fPIC --param ssp-buffer-size=1
 LDFLAGS=$(LIB) -lssl -lcrypto -levent_core -levent_extra -levent_openssl -largtable2 -ldl -z relro -z now
 
-OBJS=listener.o logger.o proxy.o ssl.o util.o client.o
+OBJS=listener.o logger.o proxy.o ssl.o util.o client.o ../Elligator/elligator2.o ../Elligator/curve25519-donna.o
 TARGETS=telex-client
 
 all: $(TARGETS)

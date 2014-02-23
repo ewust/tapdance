@@ -32,6 +32,12 @@ int telex_client(int listen_port, int remote_port, int debug_level, const char *
 	conf.notblocked_host = remote_host;
 	conf.ca_list = (char *)cafile;
 	conf.keyfile = (char *)keyfile;
+    FILE *keyf = fopen(keyfile, "r");
+    if (!keyf) {
+        LogFatal("main", "Could not open keyfile '%s'", keyfile);
+    }
+    fread(conf.station_pubkey, sizeof(conf.station_pubkey), 1, keyf);
+    fclose(keyf);
 
 	// counters
 	conf.count_tunnels = 0;

@@ -23,8 +23,9 @@ struct telex_conf
 	char *ca_list;
 	char *dh_file;
 
-	// public key filename
+	// public key filename and value
 	const char *keyfile;
+    unsigned char station_pubkey[32];
 
 	// global state:
 	struct evdns_base *dns_base;

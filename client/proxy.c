@@ -31,6 +31,7 @@
 #include "state.h"
 #include "util.h"
 #include "gcm.h"
+#include "elligator2.h"
 
 void first_read_cb(struct bufferevent *bev, struct telex_state *state);
 static void read_cb(struct bufferevent *, struct telex_state *);
@@ -584,13 +585,106 @@ void get_key_stream(struct telex_state *state, int len, unsigned char *key_strea
     return;
 }
 
+// TODO: move to common
+size_t get_rand_str(unsigned char *randout, size_t len)
+{
+    FILE *f = fopen("/dev/urandom", "r");
+    if (!f) {
+        return 0;
+    }
+    size_t r = fread(randout, 1, len, f);
+    fclose(f);
+    return r;
+}
+
+
+typedef uint8_t u8;
+typedef int32_t s32;
+typedef int64_t limb;
+
+int curve25519_donna(u8 *, const u8 *, const u8 *);
+
+
+// TODO: move to elligator/ecc specific
+void get_encoded_point_and_secret(unsigned char *station_public,
+                                  unsigned char *shared_secret_out,
+                                  unsigned char *encoded_point_out)
+{
+
+    // First, generate an ECC point
+    unsigned char base_point[32] = {9};
+    unsigned char client_secret[32];        // e
+    unsigned char client_public[32];        // Q = eG
+    int r = 0;
+
+    do {
+        get_rand_str(client_secret, sizeof(client_secret));
+        client_secret[0] &= 248;
+        client_secret[31] &= 127;
+        client_secret[31] |= 64;
+
+        // compute Q = eG
+        curve25519_donna(client_public, client_secret, base_point);
+
+        // Encode my_public (Q) using elligator
+        r = encode(encoded_point_out, client_public);
+
+    } while (r == 0);
+
+    // Randomize 255th and 254th bits
+    unsigned char rand_bit;
+    get_rand_str(&rand_bit, 1);
+    rand_bit &= 0xc0;
+    encoded_point_out[31] |= rand_bit;
+
+    curve25519_donna(shared_secret_out, client_secret, station_public);
+
+    memset(client_secret, 0, sizeof(client_secret));
+    memset(client_public, 0, sizeof(client_public));
+
+    return;
+}
+
+// tag_out length must be at least 32 + payload_len + 15 to be safe
+size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
+                            unsigned char *station_pubkey,
+                            unsigned char *tag_out)
+{
+    unsigned char shared_secret[32];
+    size_t len = 0;
+
+    get_encoded_point_and_secret(station_pubkey, shared_secret, &tag_out[0]);
+    len += 32;
+
+    // hash shared_secret to get key/IV
+    unsigned char aes_key[SHA256_DIGEST_LENGTH];
+    unsigned char *iv_enc = &aes_key[16];   // First 16 bytes are for AES-128, last 16 are for implicit IV
+
+    SHA256_CTX sha256;
+
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
+    SHA256_Final(aes_key, &sha256);
+
+
+    AES_KEY enc_key;
+    AES_set_encrypt_key(aes_key, 128, &enc_key);    // First 16 bytes of hash for AES key, last 16 for IV
+    AES_cbc_encrypt(payload, &tag_out[sizeof(shared_secret)], payload_len, &enc_key, iv_enc, AES_ENCRYPT);
+
+    len += ((payload_len + (AES_BLOCK_SIZE - 1)) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+
+    return len;
+}
+
 void encode_master_key_in_req(struct telex_state *state)
 {
     char req[1024];
     unsigned char key_stream[1024];
-    unsigned char secret[200]; // = "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
-    int secret_len = 200;
-    int secret_idx = 0;
+    unsigned char secret[200]; // What we have to encrypt with the shared secret using AES
+    unsigned char tag[256];     // What we encode into the ciphertext:
+                                //  ElligatorEncode(Q) | AES(k, secret)
+    size_t tag_len;
+    int tag_idx = 0;
     int keystream_idx;
     int req_idx;
 
@@ -619,7 +713,13 @@ void encode_master_key_in_req(struct telex_state *state)
     }
     */
 
+    tag_len = get_tag_from_payload(secret, (p-secret), state->conf->station_pubkey, tag);
+    HexDump(LOG_TRACE, "encoder", "Tag:", tag, tag_len);
+    assert(tag_len < sizeof(tag));
+
+
     get_key_stream(state, sizeof(key_stream), key_stream);
+
 
     const char *req_start = "GET / HTTP/1.1\r\nHost: www.example.cn\r\nX-Ignore: ";
     strcpy(req, req_start);
@@ -643,9 +743,9 @@ void encode_master_key_in_req(struct telex_state *state)
         kc = key_stream[keystream_idx++];
         kd = key_stream[keystream_idx++];
 
-        sa = secret[secret_idx++];
-        sb = secret[secret_idx++];
-        sc = secret[secret_idx++];
+        sa = tag[tag_idx++];
+        sb = tag[tag_idx++];
+        sc = tag[tag_idx++];
 
         ca = (ka & 0xc0) | ((sa & 0xfc) >> 2);                          // 6 bits sa
         cb = (kb & 0xc0) | (((sa & 0x03) << 4) | ((sb & 0xf0) >> 4));   // 2 bits sa, 4 bits sb
@@ -663,7 +763,7 @@ void encode_master_key_in_req(struct telex_state *state)
         req[req_idx++] = pc;
         req[req_idx++] = pd;
 
-    } while (secret_idx < secret_len);
+    } while (tag_idx < (int)tag_len);
 
     //memcpy(&req[strlen(req_start)], state->ssl->session->master_key, key_len);
     //strcpy(&req[strlen(req_start)+256], "\r\n\r\n");
