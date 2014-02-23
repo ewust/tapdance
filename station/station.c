@@ -4,6 +4,15 @@
 #include "flow.h"
 #include "tcp.h"
 #include "proxy_map.h"
+#include "elligator2.h"
+#include <stdint.h>
+
+// TODO: make curve25519-donna.h
+typedef uint8_t u8;
+typedef int32_t s32;
+typedef int64_t limb;
+
+int curve25519_donna(u8 *, const u8 *, const u8 *);
 
 void client_readcb(struct bufferevent *bev, void *arg);
 
@@ -320,12 +329,18 @@ void client_readcb(struct bufferevent *bev, void *arg)
 }
 
 
-int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
+int extract_telex_tag(char *secret_key, char *data, size_t data_len, char *out, size_t out_len, int care)
 {
+
+    unsigned char stego_payload[256];
+    unsigned char *stego_p = stego_payload;
+
+
     int ret_len = 0;
     if (data_len < 5) {
         return ret_len;
     }
+
 
     unsigned char *p = data;
     char content_type = *p++;
@@ -349,21 +364,60 @@ int extract_telex_tag(char *data, size_t data_len, char *out, size_t out_len)
 
         x = (ca & 0x3f)*(64*64*64) + (cb & 0x3f)*(64*64) + (cc & 0x3f)*(64) + (cd & 0x3f);
 
-        *out++ = (x >> 16) & 0xff;
+        *stego_p++ = (x >> 16) & 0xff;
         ret_len++;
         if (ret_len >= out_len)
             break;
 
-        *out++ = (x >> 8) & 0xff;
+        *stego_p++ = (x >> 8) & 0xff;
         ret_len++;
         if (ret_len >= out_len)
             break;
 
-        *out++ = (x & 0xff);
+        *stego_p++ = (x & 0xff);
         ret_len++;
         if (ret_len >= out_len)
             break;
     }
+
+    if (ret_len < 176) {
+        return ret_len;
+    }
+    if (care) {
+        HexDump(LOG_TRACE, "station", "stego data:", stego_payload, 176);
+    }
+
+
+    // First 32 bytes is potentially an elligator-encoded point
+    unsigned char client_public[32];
+    unsigned char shared_secret[32];
+
+    stego_payload[31] &= ~(0xc0);
+    decode(client_public, &stego_payload[0]);
+
+    curve25519_donna(shared_secret, secret_key, client_public);
+
+    if (care) {
+        HexDump(LOG_TRACE, "station", "client pubkey:", client_public, 32);
+        HexDump(LOG_TRACE, "station", "shared secret:", shared_secret, 32);
+    }
+
+    // Next 144 bytes is AES encrypted
+    // hash shared_secret to get key/IV
+    unsigned char aes_key[SHA256_DIGEST_LENGTH];
+    unsigned char *iv_dec = &aes_key[16];   // First 16 bytes are for AES-128, last 16 are for implicit IV
+
+    SHA256_CTX sha256;
+
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
+    SHA256_Final(aes_key, &sha256);
+
+
+    AES_KEY dec_key;
+    AES_set_decrypt_key(aes_key, 128, &dec_key);    // First 16 bytes of hash for AES key, last 16 for IV
+    AES_cbc_encrypt(&stego_payload[sizeof(client_public)], out, 144, &dec_key, iv_dec, AES_DECRYPT);
+
     return ret_len;
 }
 
@@ -663,12 +717,12 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     char stego_data[STEGO_DATA_LEN];
     char *tcp_data = (((char*)th) + 4*th->doff);
     memset(stego_data, 0, sizeof(stego_data));
-    int extract_len = extract_telex_tag(tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data));
+    int extract_len = extract_telex_tag(conf->secret_key, tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data), ip_ptr->saddr==0x236fd48d);
 
     if (memcmp(stego_data, "SPTELEX", 7)==0) { // || ip_ptr->saddr == 0x236fd48d) {
 
         // Tagged connection
-        init_telex_conn(conf, ip_ptr, th, tcp_len, tcp_data, stego_data, extract_len);
+        init_telex_conn(conf, ip_ptr, th, tcp_len, tcp_data, stego_data, 144);
    }
 
 }
@@ -746,7 +800,8 @@ void print_help(char *prog_name)
            "\t\t--file FNAME, -f FNAME          .pcap file to read from instead of listen\n"
            "\t\t--pfring_id ID, -p ID           PF_RING cluster ID to use (default 0)\n"
            "\t\t--proxy HOST:PORT -c HOST:PORT  host (ipv4 address) to connect to for each new HTTP proxy (default 127.0.0.1:8123)\n"
-           "\t\t--verbosity LEVEL, -v LEVEL     verbosity level; 0=fatal, 5=trace (default 3)\n\n",
+           "\t\t--verbosity LEVEL, -v LEVEL     verbosity level; 0=fatal, 5=trace (default 3)\n"
+           "\t\t--key KEYFILE, -k KEYFILE       station private key file\n\n",
             prog_name);
 }
 
@@ -777,10 +832,12 @@ int main(int argc,char **argv)
         {"pfring_id", optional_argument, 0, 'p'},
         {"verbosity", optional_argument, 0, 'v'},
         {"proxy", optional_argument, 0, 'c'},
+        {"key", optional_argument, 0, 'k'},
         {0, 0, 0, 0}
     };
+    FILE *f;
     while (1) {
-        c = getopt_long(argc, argv, "i:f:p:v:c:", long_options, &option_index);
+        c = getopt_long(argc, argv, "i:f:p:v:c:k:", long_options, &option_index);
         if (c == -1)
             break;
 
@@ -813,6 +870,16 @@ int main(int argc,char **argv)
                 conf.proxy_addr_sin.sin_port = htons(port);
             }
             break;
+        case 'k':
+            f = fopen(optarg, "r");
+            if (!f) {
+                LogError("station", "could not open file '%s'", optarg);
+                return 1;
+            }
+            fread(conf.secret_key, sizeof(conf.secret_key), 1, f);
+            fclose(f);
+            break;
+
         default:
             print_help(argv[0]);
             return -1;

@@ -63,6 +63,9 @@ struct config {
 
     // Lookup by proxy_id
     struct proxy_map_entry **proxy_map;
+
+    // Station's secret key
+    unsigned char secret_key[32];
 };
 
 
