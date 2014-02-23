@@ -36,6 +36,9 @@ int main()
     unsigned char station_public[32];   // P = dG
 
     get_rand_str(station_secret, sizeof(station_secret));
+    station_secret[0] &= 248;
+    station_secret[31] &= 127;
+    station_secret[31] |= 64;
 
     // compute P = dG
     curve25519_donna(station_public, station_secret, base_point);
