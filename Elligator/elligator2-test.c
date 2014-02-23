@@ -67,6 +67,14 @@ int main()
 
     } while (r == 0);
 
+    // Randomize 255th and 254th bits
+    char rand_bit;
+    get_rand_str(&rand_bit, 1);
+    rand_bit &= 0xc0;
+    client_public_encoded[31] |= rand_bit;
+
+
+
     // Generate client's shared secret for this secret S = eP
     curve25519_donna(client_shared_point, client_secret, station_public);
 
@@ -100,6 +108,8 @@ int main()
     // Decode
     unsigned char station_client_public[32];        // Q = ElligatorDeocde( ElligatoreEncode( Q ) )
     unsigned char station_shared_point[32]; // S = dQ = eP
+    client_public_encoded[31] &= ~(0xc0);
+
     decode(station_client_public, client_public_encoded);
 
 
