@@ -623,7 +623,7 @@ void get_encoded_point_and_secret(unsigned char *station_public,
     int r = 0;
 
     do {
-        memset(encoded_point_out, 0, 32);
+        //memset(encoded_point_out, 0, 32);
         get_rand_str(client_secret, sizeof(client_secret));
         client_secret[0] &= 248;
         client_secret[31] &= 127;
