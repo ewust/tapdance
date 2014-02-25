@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdint.h>
 #include "elligator2.h"
+#include <sys/time.h>
 
 
 // TODO: make curve25519-donna.h
@@ -23,7 +24,13 @@ size_t get_rand_str(unsigned char *randout, size_t len)
     return r;
 }
 
+float get_ms_diff(struct timeval *start, struct timeval *end)
+{
+    return (1000.0*(end->tv_sec - start->tv_sec)) + ((float)(end->tv_usec - start->tv_usec)) / 1000.0;
+}
 
+
+#define NUM_TRIALS (10000)
 
 int main()
 {
@@ -43,43 +50,71 @@ int main()
     // compute P = dG
     curve25519_donna(station_public, station_secret, base_point);
 
-
-    // ================
-    // Client specific
-    // ================
-    unsigned char client_secret[32];        // e
-    unsigned char client_public[32];        // Q = eG
-    unsigned char client_public_encoded[32];// ElligatorEncode(Q)
-    unsigned char client_shared_point[32]; // S = eP = dQ
-    int r = 0;
-
-    do {
-        get_rand_str(client_secret, sizeof(client_secret));
-        client_secret[0] &= 248;
-        client_secret[31] &= 127;
-        client_secret[31] |= 64;
-
-        // compute Q = eG
-        curve25519_donna(client_public, client_secret, base_point);
-
-        // Encode my_public (Q) using elligator
-        r = encode(client_public_encoded, client_public);
-
-    } while (r == 0);
-
-    // Randomize 255th and 254th bits
-    char rand_bit;
-    get_rand_str(&rand_bit, 1);
-    rand_bit &= 0xc0;
-    client_public_encoded[31] |= rand_bit;
-
-
-
-    // Generate client's shared secret for this secret S = eP
-    curve25519_donna(client_shared_point, client_secret, station_public);
-
-    printf("client public point: ");
+    FILE *f = fopen("./client-points.out", "w");
+    FILE *f2 = fopen("./client-secrest.out", "w");
+    struct timeval client_start, client_end;
+    gettimeofday(&client_start, NULL);
     int i;
+    for (i=0; i<NUM_TRIALS; i++) {
+        // ================
+        // Client specific
+        // ================
+        unsigned char client_secret[32];        // e
+        unsigned char client_public[32];        // Q = eG
+        unsigned char client_public_encoded[32];// ElligatorEncode(Q)
+        unsigned char client_shared_point[32]; // S = eP = dQ
+        int r = 0;
+
+        do {
+            get_rand_str(client_secret, sizeof(client_secret));
+            client_secret[0] &= 248;
+            client_secret[31] &= 127;
+            client_secret[31] |= 64;
+
+            // compute Q = eG
+            curve25519_donna(client_public, client_secret, base_point);
+
+            // Encode my_public (Q) using elligator
+            r = encode(client_public_encoded, client_public);
+
+        } while (r == 0);
+
+        // Randomize 255th and 254th bits
+        char rand_bit;
+        get_rand_str(&rand_bit, 1);
+        rand_bit &= 0xc0;
+        client_public_encoded[31] |= rand_bit;
+
+
+
+        // Generate client's shared secret for this secret S = eP
+        curve25519_donna(client_shared_point, client_secret, station_public);
+
+        if (r=fwrite(client_public_encoded, 32, 1, f) != 1) {
+            printf("#%d fwrite client public encoded returned %d\n", i, r);
+            perror("fwrite");
+            return -1;
+        }
+
+        if (r=fwrite(client_shared_point, 32, 1, f2) != 1) {
+            printf("#%d fwrite client shared returned %d\n", i, r);
+            perror("fwrite2");
+            return -1;
+        }
+    }
+    fclose(f);
+    fclose(f2);
+
+    gettimeofday(&client_end, NULL);
+
+    float diff = get_ms_diff(&client_start, &client_end);
+    printf("Client encoded %d points in %.3f ms (%.3f ms/encoding; %d encodings/sec)\n",
+           NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000.0*NUM_TRIALS))/diff) );
+    fflush(stdout);
+
+
+    /*
+    printf("client public point: ");
     for (i=0; i<sizeof(client_public); i++) {
         printf("%02x", client_public[i]);
     }
@@ -97,25 +132,56 @@ int main()
         printf("%02x", client_shared_point[i]);
     }
     printf("\n");
+    */
+
+    f = fopen("./client-points.out", "r");
+    f2 = fopen("./station-secrets.out", "w");
+
+    struct timeval station_start, station_end;
+    gettimeofday(&station_start, NULL);
+    for (i=0; i<NUM_TRIALS; i++) {
+        // ================
+        // Station specific
+        // ================
+        //printf("\n----------\n\n");
+
+        unsigned char client_public_encoded[32];
+        int r;
+        if (r=fread(client_public_encoded, 32, 1, f) != 1) {
+            printf("fread client public encoded returned %d\n", r);
+            perror("fread");
+            return -1;
+        }
+
+        // Decode
+        unsigned char station_client_public[32];        // Q = ElligatorDeocde( ElligatoreEncode( Q ) )
+        unsigned char station_shared_point[32]; // S = dQ = eP
+        client_public_encoded[31] &= ~(0xc0);
+
+        decode(station_client_public, client_public_encoded);
 
 
+        // Get shared secret
+        curve25519_donna(station_shared_point, station_secret, station_client_public);
 
-    // ================
-    // Station specific
-    // ================
-    printf("\n----------\n\n");
+        if (r=fwrite(station_shared_point, 32, 1, f2) != 1) {
+            printf("fwrite station shared returned %d\n", r);
+            perror("fwrite");
+            return -1;
+        }
+    }
+    fclose(f);
+    fclose(f2);
 
-    // Decode
-    unsigned char station_client_public[32];        // Q = ElligatorDeocde( ElligatoreEncode( Q ) )
-    unsigned char station_shared_point[32]; // S = dQ = eP
-    client_public_encoded[31] &= ~(0xc0);
+    gettimeofday(&station_end, NULL);
 
-    decode(station_client_public, client_public_encoded);
+    diff = get_ms_diff(&station_start, &station_end);
+    printf("Station decoded %d points in %.3f ms (%.3f ms/decoding; %d decodings/sec)\n",
+           NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000*NUM_TRIALS))/diff) );
 
+    return 0;
 
-    // Get shared secret
-    curve25519_donna(station_shared_point, station_secret, station_client_public);
-
+    /*
     printf("Station got public point: ");
     for (i=0; i<sizeof(station_client_public); i++) {
         printf("%02x", station_client_public[i]);
@@ -134,7 +200,7 @@ int main()
     } else {
         printf("Mismatch...?\n");
     }
-
+    */
 
     return 0;
 }
