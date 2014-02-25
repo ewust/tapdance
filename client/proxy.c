@@ -67,8 +67,12 @@ int __ref_SSL = 0;
 
 void get_random_conn_id(struct telex_state *state)
 {
-    int f = open("/dev/urandom", 'r');
+    FILE *f = fopen("/dev/urandom", "r");
     size_t rlen = 0;
+    fread(state->remote_conn_id, 1, sizeof(state->remote_conn_id), f);
+    fclose(f);
+    return;
+    /*
     while (rlen < sizeof(state->remote_conn_id)) {
         int r = read(f, &state->remote_conn_id[rlen], sizeof(state->remote_conn_id) - rlen);
         if (r < 0) {
@@ -77,6 +81,7 @@ void get_random_conn_id(struct telex_state *state)
         rlen += r;
     }
     close(f);
+    */
 }
 
 // Allocate and initialize tunnel connection State object
@@ -618,6 +623,7 @@ void get_encoded_point_and_secret(unsigned char *station_public,
     int r = 0;
 
     do {
+        memset(encoded_point_out, 0, 32);
         get_rand_str(client_secret, sizeof(client_secret));
         client_secret[0] &= 248;
         client_secret[31] &= 127;
@@ -634,10 +640,15 @@ void get_encoded_point_and_secret(unsigned char *station_public,
     // Randomize 255th and 254th bits
     unsigned char rand_bit;
     get_rand_str(&rand_bit, 1);
+    LogDebug("encoder", "rand byte: %02x", rand_bit);
+    HexDump(LOG_DEBUG, "encoder", "encoded_point_out", encoded_point_out, 32);
     rand_bit &= 0xc0;
     encoded_point_out[31] |= rand_bit;
 
     curve25519_donna(shared_secret_out, client_secret, station_public);
+
+    HexDump(LOG_DEBUG, "encoder", "client_public", client_public, 32);
+    HexDump(LOG_DEBUG, "encoder", "client_secret", client_secret, 32);
 
     memset(client_secret, 0, sizeof(client_secret));
     memset(client_public, 0, sizeof(client_public));
@@ -646,7 +657,7 @@ void get_encoded_point_and_secret(unsigned char *station_public,
 }
 
 // tag_out length must be at least 32 + payload_len + 15 to be safe
-size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
+size_t get_tag_from_payload(struct telex_state *state, unsigned char *payload, size_t payload_len,
                             unsigned char *station_pubkey,
                             unsigned char *tag_out)
 {
@@ -655,6 +666,8 @@ size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
 
     get_encoded_point_and_secret(station_pubkey, shared_secret, &tag_out[0]);
     len += 32;
+
+    HexDump(LOG_TRACE, state->name, "shared secret", shared_secret, 32);
 
     // hash shared_secret to get key/IV
     unsigned char aes_key[SHA256_DIGEST_LENGTH];
@@ -665,7 +678,6 @@ size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
     SHA256_Init(&sha256);
     SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
     SHA256_Final(aes_key, &sha256);
-
 
     AES_KEY enc_key;
     AES_set_encrypt_key(aes_key, 128, &enc_key);    // First 16 bytes of hash for AES key, last 16 for IV
@@ -712,9 +724,10 @@ void encode_master_key_in_req(struct telex_state *state)
         sprintf((char*)&secret[2*i+14], "%02x", state->ssl->session->master_key[i]);
     }
     */
+    HexDump(LOG_DEBUG, state->name, "secret", secret, (p-secret));
 
-    tag_len = get_tag_from_payload(secret, (p-secret), state->conf->station_pubkey, tag);
-    HexDump(LOG_TRACE, "encoder", "Tag:", tag, tag_len);
+    tag_len = get_tag_from_payload(state, secret, (p-secret), state->conf->station_pubkey, tag);
+    HexDump(LOG_DEBUG, "encoder", "Tag:", tag, tag_len);
     assert(tag_len < sizeof(tag));
 
 
