@@ -234,6 +234,9 @@ int encode(unsigned char *out, const unsigned char *in){
     mpz_set_si(coeff_A, 486662);
     
     //***********
+    // initialize out to 0
+    memset(out,0,32);
+    
     mpz_t x_coord;
     mpz_init(x_coord);
     
