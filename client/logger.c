@@ -130,7 +130,7 @@ void HexDump(enum LogLevel level, const char *loggerName, const char *message, v
 		}
 	}
 	*p = '\0';
-	LogLog(level, loggerName, str);
+	LogLog(level, loggerName, "%s", str);
 	free(str);
 }
 
