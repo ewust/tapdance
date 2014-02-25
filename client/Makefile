@@ -8,7 +8,7 @@ LIB=-L/usr/lib -lgmp
 #INCLUDE=-I/usr/local/include
 #LIB=-L/usr/local/lib
 
-CFLAGS=-g -Wall $(INCLUDE) \
+CFLAGS=-O3 -g -Wall $(INCLUDE) \
 	-Wformat=2 -Wno-format-nonliteral \
 	-fno-strict-aliasing \
 	-Wextra \
