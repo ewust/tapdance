@@ -196,7 +196,9 @@ void eventcb(struct bufferevent *bev, short events, void *arg)
         LogTrace(state->name, "%s EVENT_CONNECTED", PARTY(bev, state));
 
         bufferevent_enable(state->proxy_bev, EV_READ|EV_WRITE);
-        bufferevent_enable(state->client_bev, EV_READ|EV_WRITE);
+        if (state->client_bev) {
+            bufferevent_enable(state->client_bev, EV_READ|EV_WRITE);
+        }
     } else if (events & BEV_EVENT_EOF) {
         LogTrace(state->name, "%s EVENT_EOF", PARTY(bev, state));
 
@@ -269,6 +271,11 @@ void proxy_readcb(struct bufferevent *bev, void *arg)
     struct telex_st *state = arg;
     struct config *conf = state->conf;
 
+    if (!state->client_bev) {
+        LogWarn(state->name, "you don't have a client connection but proxy had data");
+        cleanup_telex(&state);
+        return;
+    }
     struct evbuffer *src = bufferevent_get_input(bev);
     struct evbuffer *dst = bufferevent_get_output(state->client_bev);
     size_t buffer_len = evbuffer_get_length(src);
@@ -646,6 +653,7 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     struct config *conf = ptr;
     size_t pkt_len = pkthdr->caplen;
     struct iphdr *ip_ptr = (struct iphdr*)(packet+sizeof(struct ether_header));
+    int care = (ip_ptr->saddr == 0x7b3f2844);
 
     conf->stats.tot_pkts++;
     conf->stats.delta_bits += 8*pkthdr->caplen;
@@ -660,6 +668,13 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     pkt_len -= sizeof(struct ether_header) + 4*(ip_ptr->ihl);   // size of tcp header + data
     struct tcphdr *th = (struct tcphdr*)(packet+sizeof(struct ether_header)+(4*(ip_ptr->ihl)));
     uint32_t tcp_len = ntohs(ip_ptr->tot_len) - 4*(ip_ptr->ihl);
+    char dst_addr[INET_ADDRSTRLEN], src_addr[INET_ADDRSTRLEN];
+
+    if (care) {
+        inet_ntop(AF_INET, &ip_ptr->saddr, src_addr, INET_ADDRSTRLEN);
+        inet_ntop(AF_INET, &ip_ptr->daddr, dst_addr, INET_ADDRSTRLEN);
+        LogTrace("handle_pkt", "%s:%d -> %s:%d tcplen %d pktlen %d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest), tcp_len, pkt_len);
+    }
 
     if (tcp_len > pkt_len) {
         return;
@@ -677,7 +692,11 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
         return;
     }
 
+
     struct flow *cur_flow = lookup_flow(&conf->conn_map, ip_ptr->saddr, ip_ptr->daddr, th->source, th->dest);
+    if (care) {
+        LogTrace("handle_pkt", "%s:%d -> %s:%d is_tls_data_packet=1, cur_flow=%p", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest), cur_flow);
+    }
     if (cur_flow != NULL) {
         // We have heard of this before; either it's a non-Telex flow (in which case we don't care),
         // or it's a Telex flow (in which case our forge-socket will pickup this packet)
@@ -717,7 +736,12 @@ void handle_pkt(void *ptr, const struct pcap_pkthdr *pkthdr, const u_char *packe
     char stego_data[STEGO_DATA_LEN];
     char *tcp_data = (((char*)th) + 4*th->doff);
     memset(stego_data, 0, sizeof(stego_data));
-    int extract_len = extract_telex_tag(conf->secret_key, tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data), ip_ptr->saddr==0x236fd48d);
+    int extract_len = extract_telex_tag(conf->secret_key, tcp_data, tcp_len - 4*th->doff, stego_data, sizeof(stego_data), care); //ip_ptr->saddr==0x236fd48d);
+
+    if (care) {
+        LogTrace("handle_pkt", "%s:%d -> %s:%d extract_telex_tag %d", src_addr, ntohs(th->source), dst_addr, ntohs(th->dest), extract_len);
+        HexDump(LOG_TRACE, "handle_pkt", "stego_data", stego_data, extract_len);
+    }
 
     if (memcmp(stego_data, "SPTELEX", 7)==0) { // || ip_ptr->saddr == 0x236fd48d) {
 
