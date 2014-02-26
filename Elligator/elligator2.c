@@ -30,6 +30,43 @@ typedef int64_t limb;
 
 int curve25519_donna(u8 *, const u8 *, const u8 *);
 
+
+
+size_t get_payload_from_tag(unsigned char *station_privkey,
+                            unsigned char *stego_payload,
+                            char *out, size_t out_len)
+{
+    // First 32 bytes is potentially an elligator-encoded point
+    unsigned char client_public[32];
+    unsigned char shared_secret[32];
+
+    stego_payload[31] &= ~(0xc0);
+    decode(client_public, &stego_payload[0]);
+
+    curve25519_donna(shared_secret, station_privkey, client_public);
+
+    // Next 144 bytes is AES encrypted
+    // hash shared_secret to get key/IV
+    unsigned char aes_key[SHA256_DIGEST_LENGTH];
+    unsigned char *iv_dec = &aes_key[16];   // First 16 bytes are for AES-128, last 16 are for implicit IV
+
+    SHA256_CTX sha256;
+
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
+    SHA256_Final(aes_key, &sha256);
+
+
+    AES_KEY dec_key;
+    AES_set_decrypt_key(aes_key, 128, &dec_key);    // First 16 bytes of hash for AES key, last 16 for IV
+    // TODO: length/padding etc
+    AES_cbc_encrypt(&stego_payload[sizeof(client_public)], out, 144, &dec_key, iv_dec, AES_DECRYPT);
+
+    return 176; // TODO: length/padding etc
+
+}
+
+
 // Client calls this to get a random shared secret and public point,
 // given the station's public key.
 void get_encoded_point_and_secret(unsigned char *station_public,

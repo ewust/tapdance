@@ -9,6 +9,13 @@
 #define _elligator2_h
 
 
+
+// For the station; given a tag, return the payload.
+// Currently, out must support at least 144 bytes
+size_t get_payload_from_tag(unsigned char *station_privkey,
+                            unsigned char *stego_payload,
+                            char *out, size_t out_len);
+
 // Client calls this to get a random shared secret and public point,
 // given the station's public key.
 void get_encoded_point_and_secret(unsigned char *station_public,

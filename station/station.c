@@ -394,38 +394,7 @@ int extract_telex_tag(char *secret_key, char *data, size_t data_len, char *out, 
         HexDump(LOG_TRACE, "station", "stego data:", stego_payload, 176);
     }
 
-
-    // First 32 bytes is potentially an elligator-encoded point
-    unsigned char client_public[32];
-    unsigned char shared_secret[32];
-
-    stego_payload[31] &= ~(0xc0);
-    decode(client_public, &stego_payload[0]);
-
-    curve25519_donna(shared_secret, secret_key, client_public);
-
-    if (care) {
-        HexDump(LOG_TRACE, "station", "client pubkey:", client_public, 32);
-        HexDump(LOG_TRACE, "station", "shared secret:", shared_secret, 32);
-    }
-
-    // Next 144 bytes is AES encrypted
-    // hash shared_secret to get key/IV
-    unsigned char aes_key[SHA256_DIGEST_LENGTH];
-    unsigned char *iv_dec = &aes_key[16];   // First 16 bytes are for AES-128, last 16 are for implicit IV
-
-    SHA256_CTX sha256;
-
-    SHA256_Init(&sha256);
-    SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
-    SHA256_Final(aes_key, &sha256);
-
-
-    AES_KEY dec_key;
-    AES_set_decrypt_key(aes_key, 128, &dec_key);    // First 16 bytes of hash for AES key, last 16 for IV
-    AES_cbc_encrypt(&stego_payload[sizeof(client_public)], out, 144, &dec_key, iv_dec, AES_DECRYPT);
-
-    return ret_len;
+    return get_payload_from_tag(secret_key, stego_payload, out, out_len);
 }
 
 struct init_msg_st {
