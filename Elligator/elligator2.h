@@ -9,6 +9,19 @@
 #define _elligator2_h
 
 
+// Client calls this to get a random shared secret and public point,
+// given the station's public key.
+void get_encoded_point_and_secret(unsigned char *station_public,
+                                  unsigned char *shared_secret_out,
+                                  unsigned char *encoded_point_out);
+
+// For the client; given a payload and a station public key, provides
+// an output. Currently, tag_out must be >= 176 byte buffer for
+// the given payload lengths we are using
+size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
+                            unsigned char *station_pubkey,
+                            unsigned char *tag_out);
+
 // Takes as input a 32-byte little endian string (technically 255 bits padded to 32 bytes)
 // Returns 0 if string could not be decoded, i.e., does not correspond to an elliptic curve point (highly unlikely)
 // If possible, outputs 32 byte x-coord of curve25519 point corresponding to input string

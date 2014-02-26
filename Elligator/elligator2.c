@@ -10,6 +10,10 @@
 #include <gmp.h>
 #include <string.h>
 #include "elligator2.h"
+#include <openssl/rand.h>
+#include <openssl/aes.h>
+#include <openssl/sha.h>
+
 void square_root(mpz_t root, const mpz_t square);
 int calc_y(mpz_t y_coord, const mpz_t x_coord);
 int is_encodable(const mpz_t);
@@ -18,6 +22,97 @@ int is_encodable(const mpz_t);
 // other code for DH?
 // Clean up code ....
 // Some tests
+
+//typedef uint8_t u8;
+typedef unsigned char u8;
+typedef int32_t s32;
+typedef int64_t limb;
+
+int curve25519_donna(u8 *, const u8 *, const u8 *);
+
+// Client calls this to get a random shared secret and public point,
+// given the station's public key.
+void get_encoded_point_and_secret(unsigned char *station_public,
+                                  unsigned char *shared_secret_out,
+                                  unsigned char *encoded_point_out)
+{
+
+    // First, generate an ECC point
+    unsigned char base_point[32] = {9};
+    unsigned char client_secret[32];        // e
+    unsigned char client_public[32];        // Q = eG
+    int r = 0;
+
+    do {
+        //memset(encoded_point_out, 0, 32);
+        //get_rand_str(client_secret, sizeof(client_secret));
+        RAND_bytes(client_secret, sizeof(client_secret));
+        client_secret[0] &= 248;
+        client_secret[31] &= 127;
+        client_secret[31] |= 64;
+
+        // compute Q = eG
+        curve25519_donna(client_public, client_secret, base_point);
+
+        // Encode my_public (Q) using elligator
+        r = encode(encoded_point_out, client_public);
+
+    } while (r == 0);
+
+    // Randomize 255th and 254th bits
+    unsigned char rand_bit;
+    RAND_bytes(&rand_bit, 1);
+    //LogDebug("encoder", "rand byte: %02x", rand_bit);
+    //HexDump(LOG_DEBUG, "encoder", "encoded_point_out", encoded_point_out, 32);
+    rand_bit &= 0xc0;
+    encoded_point_out[31] |= rand_bit;
+
+    curve25519_donna(shared_secret_out, client_secret, station_public);
+
+    //HexDump(LOG_DEBUG, "encoder", "client_public", client_public, 32);
+    //HexDump(LOG_DEBUG, "encoder", "client_secret", client_secret, 32);
+
+    memset(client_secret, 0, sizeof(client_secret));
+    memset(client_public, 0, sizeof(client_public));
+
+    return;
+}
+
+// tag_out length must be at least 32 + payload_len + 15 to be safe
+// For the client; given a payload and a station public key, provides
+// an output. Currently, tag_out must be >= 176 byte buffer.
+size_t get_tag_from_payload(unsigned char *payload, size_t payload_len,
+                            unsigned char *station_pubkey,
+                            unsigned char *tag_out)
+{
+    unsigned char shared_secret[32];
+    size_t len = 0;
+
+    get_encoded_point_and_secret(station_pubkey, shared_secret, &tag_out[0]);
+    len += 32;
+
+    // hash shared_secret to get key/IV
+    unsigned char aes_key[SHA256_DIGEST_LENGTH];
+    unsigned char *iv_enc = &aes_key[16];   // First 16 bytes are for AES-128, last 16 are for implicit IV
+
+    SHA256_CTX sha256;
+
+    SHA256_Init(&sha256);
+    SHA256_Update(&sha256, shared_secret, sizeof(shared_secret));
+    SHA256_Final(aes_key, &sha256);
+
+    AES_KEY enc_key;
+    AES_set_encrypt_key(aes_key, 128, &enc_key);    // First 16 bytes of hash for AES key, last 16 for IV
+    AES_cbc_encrypt(payload, &tag_out[sizeof(shared_secret)], payload_len, &enc_key, iv_enc, AES_ENCRYPT);
+
+    len += ((payload_len + (AES_BLOCK_SIZE - 1)) / AES_BLOCK_SIZE) * AES_BLOCK_SIZE;
+
+    return len;
+}
+
+
+
+
 
 // Decode function
 // Outputs elliptic curve point as 32 byte little endian; high order bit is sign of y
