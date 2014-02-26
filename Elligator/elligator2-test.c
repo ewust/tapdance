@@ -42,7 +42,8 @@ int main()
     unsigned char station_secret[32];   // d
     unsigned char station_public[32];   // P = dG
 
-    get_rand_str(station_secret, sizeof(station_secret));
+    //get_rand_str(station_secret, sizeof(station_secret));
+    RAND_bytes(station_secret, sizeof(station_secret));
     station_secret[0] &= 248;
     station_secret[31] &= 127;
     station_secret[31] |= 64;
@@ -50,11 +51,45 @@ int main()
     // compute P = dG
     curve25519_donna(station_public, station_secret, base_point);
 
-    FILE *f = fopen("./client-points.out", "w");
+
+
+
+
+    // ================
+    // Point muls
+    // ================
+    struct timeval start, end;
+    FILE *f = fopen("./points", "w");
+    gettimeofday(&start, NULL);
+    int i;
+    for (i=0; i<NUM_TRIALS; i++ ) {
+        unsigned char out[32];
+        unsigned char secret[32];
+        RAND_bytes(secret, 32);
+        curve25519_donna(out, secret, base_point);
+
+        if (fwrite(out, 32, 1, f) != 1) {
+            printf("Fail\n");
+            return -1;
+        }
+
+    }
+    fclose(f);
+    gettimeofday(&end, NULL);
+
+
+    float diff = get_ms_diff(&start, &end);
+    printf("Point multiplied %d points in %.3f ms (%.3f ms/pmul; %d pmul/sec)\n",
+           NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000.0*NUM_TRIALS))/diff) );
+    fflush(stdout);
+
+
+
+
+    f = fopen("./client-points.out", "w");
     FILE *f2 = fopen("./client-secrest.out", "w");
     struct timeval client_start, client_end;
     gettimeofday(&client_start, NULL);
-    int i;
     for (i=0; i<NUM_TRIALS; i++) {
         // ================
         // Client specific
@@ -66,7 +101,8 @@ int main()
         int r = 0;
 
         do {
-            get_rand_str(client_secret, sizeof(client_secret));
+            //get_rand_str(client_secret, sizeof(client_secret));
+            RAND_bytes(client_secret, 32);
             client_secret[0] &= 248;
             client_secret[31] &= 127;
             client_secret[31] |= 64;
@@ -81,7 +117,8 @@ int main()
 
         // Randomize 255th and 254th bits
         char rand_bit;
-        get_rand_str(&rand_bit, 1);
+        //get_rand_str(&rand_bit, 1);
+        RAND_bytes(&rand_bit, 1);
         rand_bit &= 0xc0;
         client_public_encoded[31] |= rand_bit;
 
@@ -107,7 +144,7 @@ int main()
 
     gettimeofday(&client_end, NULL);
 
-    float diff = get_ms_diff(&client_start, &client_end);
+    diff = get_ms_diff(&client_start, &client_end);
     printf("Client encoded %d points in %.3f ms (%.3f ms/encoding; %d encodings/sec)\n",
            NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000.0*NUM_TRIALS))/diff) );
     fflush(stdout);
@@ -159,6 +196,7 @@ int main()
         client_public_encoded[31] &= ~(0xc0);
 
         decode(station_client_public, client_public_encoded);
+        //memcpy(station_client_public, client_public_encoded, 32);
 
 
         // Get shared secret
@@ -177,6 +215,71 @@ int main()
 
     diff = get_ms_diff(&station_start, &station_end);
     printf("Station decoded %d points in %.3f ms (%.3f ms/decoding; %d decodings/sec)\n",
+           NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000*NUM_TRIALS))/diff) );
+
+
+
+    // ==============
+    // Client tags...
+    // ==============
+    struct timeval tag_start, tag_end;
+    int r;
+    f = fopen("./client-tags.out", "w");
+    gettimeofday(&tag_start, NULL);
+    for (i=0; i<NUM_TRIALS; i++) {
+
+        // Client specific, generate tags
+        unsigned char payload[144];
+        unsigned char tag[200];
+        RAND_bytes(payload, 144);
+        strcpy(payload, "SPTELEX");
+        get_tag_from_payload(payload, 144, station_public, tag);
+
+        if ((r=fwrite(tag, 176, 1, f)) != 1) {
+            printf("fwrite problem: %d\n", r);
+            return -1;
+        }
+    }
+    fclose(f);
+    gettimeofday(&tag_end, NULL);
+
+    diff = get_ms_diff(&tag_start, &tag_end);
+    printf("Client created %d tags %.3f ms (%.3f ms/tag; %d tags/sec)\n",
+           NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000*NUM_TRIALS))/diff) );
+
+
+
+
+
+    // ==============
+    // Station decrypt
+    // ==============
+    f = fopen("./client-tags.out", "r");
+    gettimeofday(&tag_start, NULL);
+    for (i=0; i<NUM_TRIALS; i++) {
+        unsigned char tag[176];
+        unsigned char payload[144];
+
+        if ((r=fread(tag, 176, 1, f)) != 1) {
+            printf("fread problem: %d\n", r);
+            return -1;
+        }
+
+        get_payload_from_tag(station_secret, tag, payload, sizeof(payload));
+        if (memcmp(payload, "SPTELEX", 7) != 0) {
+            printf("Uh oh! Tag %d problem:\n", i);
+            int j;
+            for (j=0; j<144; j++) {
+                printf("%02x", payload[j]);
+            }
+        }
+    }
+    fclose(f);
+    gettimeofday(&tag_end, NULL);
+
+
+    diff = get_ms_diff(&tag_start, &tag_end);
+    printf("Station read %d tags %.3f ms (%.3f ms/tag; %d tags/sec)\n",
            NUM_TRIALS, diff, diff/((float)NUM_TRIALS), (int)(((float)(1000*NUM_TRIALS))/diff) );
 
     return 0;

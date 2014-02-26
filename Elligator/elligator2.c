@@ -30,8 +30,6 @@ typedef int64_t limb;
 
 int curve25519_donna(u8 *, const u8 *, const u8 *);
 
-
-
 size_t get_payload_from_tag(unsigned char *station_privkey,
                             unsigned char *stego_payload,
                             char *out, size_t out_len)
