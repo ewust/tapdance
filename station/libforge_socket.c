@@ -4,6 +4,7 @@
 #include "forge_socket.h"
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <stdlib.h>
 
 // TODO: one day, we should actually add a libforge_socket to the forge_socket/userspace
 
