@@ -727,10 +727,13 @@ void print_status(evutil_socket_t fd, short what, void *ptr)
     struct timeval tv;
     gettimeofday(&tv, NULL);
 
-    if (conf->ring == NULL) {
-        pcap_stats(conf->pcap, &stats);
-    } else {
+#ifdef PFRING
+    if (conf->ring != NULL) {
         memset(&stats, 0, sizeof(stats));
+    } else
+#endif
+    {
+        pcap_stats(conf->pcap, &stats);
     }
 
     int num_removed = cleanup_expired(conf);
@@ -764,6 +767,7 @@ void pkt_cb(evutil_socket_t fd, short what, void *ptr)
     const char *pkt;
     struct pcap_pkthdr pkt_hdr;
 
+#ifdef PFRING
     if (conf->ring != NULL) {
         int ret;
         struct pfring_pkthdr hdr;
@@ -775,6 +779,7 @@ void pkt_cb(evutil_socket_t fd, short what, void *ptr)
         }
         return;
     }
+#endif
 
     // file or pcap (non pfring)
     pkt = pcap_next(conf->pcap, &pkt_hdr);
@@ -910,6 +915,7 @@ int main(int argc,char **argv)
 
         conf.pcap_fd = fileno(pcap_fstream);
 
+#ifdef PFRING
     } else if (conf.pfring_id) {
         conf.ring = pfring_open(conf.dev, 65535, PF_RING_PROMISC);
         if (!conf.ring) {
@@ -936,6 +942,7 @@ int main(int argc,char **argv)
 
         conf.pcap_fd = conf.ring->fd;
         LogDebug("station", "using fd %d", conf.pcap_fd);
+#endif
     }
 
 

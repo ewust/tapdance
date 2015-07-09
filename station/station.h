@@ -21,7 +21,9 @@
 #include <fcntl.h>
 #include <getopt.h>
 
+#ifdef PFRING
 #include "pfring.h"
+#endif
 #include "ssl_api.h"
 #include "gcm.h"
 #include "logger.h"
@@ -42,7 +44,9 @@ struct stats_t {
 
 struct config {
     char    *dev;
+#ifdef PFRING
     pfring  *ring;
+#endif
     pcap_t  *pcap;
     int     raw_sock;
     int     pcap_fd;
