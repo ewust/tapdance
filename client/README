@@ -1,0 +1,4 @@
+sudo apt-get install libevent-dev libssl-dev libargtable2-dev libgmp-dev
+make
+./tapdance-client -k pubkey.dev -d 5 tor-exit.eecs.umich.edu
+mkdir -p /tmp/chrome && google-chrome --incognito --proxy-server="http://127.0.0.1:8888" --user-data-dir=/tmp/chrome

@@ -20,11 +20,11 @@ CFLAGS=-O3 -g -Wall $(INCLUDE) \
 LDFLAGS=$(LIB) -lssl -lcrypto -levent_core -levent_extra -levent_openssl -largtable2 -ldl -z relro -z now
 
 OBJS=listener.o logger.o proxy.o ssl.o util.o client.o ../Elligator/elligator2.o ../Elligator/curve25519-donna.o
-TARGETS=telex-client
+TARGETS=tapdance-client
 
 all: $(TARGETS)
 
-telex-client: $(OBJS)
+tapdance-client: $(OBJS)
 	$(CC) -o $@ $(CFLAGS) $^ $(LDFLAGS)
 
 .PHONY: clean
